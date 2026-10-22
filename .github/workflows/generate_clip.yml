@@ -4,7 +4,7 @@ on:
   schedule:
     # يعمل 4 مرات يومياً: 2 الظهر، 5 المغرب، 8 بالليل، 10 بالليل (توقيت مصر / السعودية)
     - cron: '0 11,14,17,19 * * *'
-  workflow_dispatch: # يتيح لك التشغيل اليدوي بزر Run workflow في أي وقت
+  workflow_dispatch: # يتيح التشغيل اليدوي في أي وقت
 
 jobs:
   generate:
@@ -36,9 +36,6 @@ jobs:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
-          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
-          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
-          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
         run: |
           python3 quran_clip_generator.py
 
