@@ -29,6 +29,11 @@ MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY")
 
+# المتغيرات الخاصة بـ TikTok API
+TIKTOK_CLIENT_KEY = os.environ.get("TIKTOK_CLIENT_KEY")
+TIKTOK_CLIENT_SECRET = os.environ.get("TIKTOK_CLIENT_SECRET")
+TIKTOK_REFRESH_TOKEN = os.environ.get("TIKTOK_REFRESH_TOKEN")
+
 # البحث التلقائي عن مسار خط المصحف
 FONT_PATH = "/usr/share/fonts/opentype/fonts-hosny-amiri/AmiriQuran.ttf"
 if not os.path.exists(FONT_PATH):
@@ -333,7 +338,80 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
     clip_title = f"سورة {surah_name_ar} (الآيات {start_ayah}-{end_ayah}) | القارئ {reciter_info['name']} #قرآن #shorts"
     return out_file, clip_title
 
-# --- 7. رفع الفيديو إلى GitHub Releases وإشعار Make.com ---
+# --- 7. دوال النشر على TikTok عبر Content Posting API ---
+def get_tiktok_access_token():
+    """تجديد توكن TikTok تلقائياً باستخدام Refresh Token"""
+    url = "https://open.tiktokapis.com/v2/oauth/token/"
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    data = {
+        "client_key": TIKTOK_CLIENT_KEY,
+        "client_secret": TIKTOK_CLIENT_SECRET,
+        "grant_type": "refresh_token",
+        "refresh_token": TIKTOK_REFRESH_TOKEN
+    }
+    res = requests.post(url, headers=headers, data=data, timeout=30).json()
+    if "data" in res and "access_token" in res["data"]:
+        return res["data"]["access_token"]
+    elif "access_token" in res:
+        return res["access_token"]
+    raise Exception(f"Failed to refresh TikTok access token: {res}")
+
+def upload_to_tiktok(video_path, title):
+    """رفع الفيديو إلى TikTok مباشرة"""
+    if not all([TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET, TIKTOK_REFRESH_TOKEN]):
+        print("[!] بيانات TikTok API غير مكتملة في Secrets، تم تخطي الرفع إلى تيك توك.")
+        return
+
+    print("[*] بدء رفع الفيديو إلى TikTok...")
+    try:
+        access_token = get_tiktok_access_token()
+        video_size = os.path.getsize(video_path)
+
+        init_url = "https://open.tiktokapis.com/v2/post/publish/video/init/"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "post_info": {
+                "title": title[:150],
+                "privacy_level": "SELF_ONLY",  # في وضع Sandbox ينزل الفيديو كمسودة لحسابك
+                "disable_duet": False,
+                "disable_comment": False,
+                "disable_stitch": False
+            },
+            "source_info": {
+                "source": "FILE_UPLOAD",
+                "video_size": video_size,
+                "chunk_size": video_size,
+                "total_chunk_count": 1
+            }
+        }
+
+        init_res = requests.post(init_url, json=payload, headers=headers, timeout=30).json()
+        if init_res.get("error", {}).get("code") != "ok":
+            print(f"[!] خطأ في تهيئة رفع TikTok: {init_res}")
+            return
+
+        upload_url = init_res["data"]["upload_url"]
+        publish_id = init_res["data"]["publish_id"]
+
+        upload_headers = {
+            "Content-Range": f"bytes 0-{video_size - 1}/{video_size}",
+            "Content-Type": "video/mp4"
+        }
+        with open(video_path, "rb") as video_file:
+            upload_res = requests.put(upload_url, data=video_file, headers=upload_headers, timeout=120)
+
+        if upload_res.status_code in [200, 201]:
+            print(f"[✓] تم الرفع بنجاح إلى TikTok! معرف النشر (Publish ID): {publish_id}")
+        else:
+            print(f"[!] فشل إرسال بايتات الفيديو إلى TikTok: {upload_res.status_code} - {upload_res.text}")
+
+    except Exception as e:
+        print(f"[!] خطأ أثناء النشر على تيك توك: {e}")
+
+# --- 8. رفع الفيديو إلى GitHub Releases وإشعار Make.com ---
 def upload_to_github_release(video_path, tag_name="latest"):
     if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
         print("[!] بيانات GitHub Token أو المستودع غير متوفرة لرفع الـ Release.")
@@ -394,13 +472,16 @@ def notify_make(video_url, video_title):
         print(f"[!] خطأ أثناء إرسال البيانات إلى Make: {res.status_code} - {res.text}")
 
 if __name__ == "__main__":
-    # تشغيل التوليد
+    # 1. تشغيل إنتاج الفيديو
     video_path, title = generate_video(surah_num=2, reciter_key="minshawi")
     
     if video_path and title:
-        # الرفع والحصول على الرابط المباشر
+        # 2. النشر المباشر على تيك توك
+        upload_to_tiktok(video_path, title)
+
+        # 3. الرفع إلى GitHub Releases للحصول على الرابط المباشر
         direct_link = upload_to_github_release(video_path)
         
-        # إرسال الرابط للـ Webhook
+        # 4. إرسال الرابط إلى Make.com للنشر على يوتيوب، فيسبوك، وإنستغرام
         if direct_link:
             notify_make(direct_link, title)
