@@ -1,44 +1,50 @@
 """
-اختبار التحقق قبل بناء مشروع القرآن.
-بيتأكد من: (1) محرك الرسم RAQM  (2) الخط  (3) نص الآيات ومطابقته بين مصدرين
-(4) صوت المنشاوي والدوسري مع توقيت الآيات  (5) رسم الآية فعليًا
-(6) JSON الخام للتوقيت  (7) everyayah  (8) فروق الآيات بين المصدرين.
-كل اختبار مستقل: لو واحد فشل الباقي يكمل، والنتيجة كلها بتتحفظ في probe_output/report.txt
+فحص ثاني (بعد نتيجة الفحص الأول):
+ أ) تصنيف فروق النص بين Quran.com و alquran.cloud: فروق شكلية ولا فروق كلمات حقيقية.
+ ب) صحة التوقيت: بنقطّع كل آية من ملف السورة بالتوقيت (مفتاح timestamps)،
+    ونقارن مدتها بمدة ملف الآية الجاهز. والمقاطع بتتحفظ في probe_output2/slices عشان تسمعها.
+المطلوب: ffmpeg و ffprobe متثبتين، وquran_probe.py يكون في نفس الفولدر.
 """
 import os
-import re
-import glob
-import json
-import time
+import shutil
+import subprocess
+import collections
 import difflib
 import requests
-from PIL import Image, ImageDraw, ImageFont, features
 
-OUT = "probe_output"
-os.makedirs(OUT, exist_ok=True)
+from quran_probe import (HEADERS, QCOM, get_json, normalize, same,
+                         quran_com_chapter, alquran_cloud_all)
+
+OUT = "probe_output2"
+for sub in ("slices", "per_ayah", "chapters"):
+    os.makedirs(os.path.join(OUT, sub), exist_ok=True)
 REPORT = []
-HEADERS = {"User-Agent": "quran-probe/1.0"}
-QCOM = "https://api.quran.com/api/v4"
-ARABIC_DIGITS = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
+
+# سور الاختبار (غيّرها براحتك). فيها سورة 112 و سور قصيرة تانية
+CHAPTERS = [112, 93, 108]
+# أقصى فرق مقبول (ثواني) بين مدة المقطع ومدة ملف الآية الجاهز
+TOL = 0.8
+
+RECITERS = {
+    "minshawi": {
+        "chapter_id": 9,
+        "per_ayah": {
+            "qurancdn": "https://audio.qurancdn.com/Minshawi/Murattal/mp3/{c:03d}{v:03d}.mp3",
+            "everyayah": "https://everyayah.com/data/Minshawy_Murattal_128kbps/{c:03d}{v:03d}.mp3",
+        },
+    },
+    "dosari": {
+        "chapter_id": 97,
+        "per_ayah": {
+            "everyayah": "https://everyayah.com/data/Yasser_Ad-Dussary_128kbps/{c:03d}{v:03d}.mp3",
+        },
+    },
+}
 
 
 def log(msg=""):
     print(msg, flush=True)
     REPORT.append(str(msg))
-
-
-def get_json(url, retries=3, **params):
-    """GET مع إعادة محاولة لو السيرفر رجّع 5xx"""
-    last = None
-    for i in range(retries):
-        r = requests.get(url, params=params, timeout=60, headers=HEADERS)
-        if r.status_code >= 500:
-            last = r
-            time.sleep(2 * (i + 1))
-            continue
-        r.raise_for_status()
-        return r.json()
-    last.raise_for_status()
 
 
 def run(name, fn):
@@ -52,344 +58,115 @@ def run(name, fn):
 
 
 # ---------------------------------------------------------------
-# 1. RAQM
+# أ) تصنيف الفروق
 # ---------------------------------------------------------------
-def test_raqm():
-    ok = features.check("raqm")
-    log("PASS: RAQM شغال" if ok else "FAIL: RAQM مش شغال (محتاج libraqm و libfribidi)")
-    return ok
-
-
-# ---------------------------------------------------------------
-# 2. الخط
-# ---------------------------------------------------------------
-FONT = None
-
-
-def test_font():
-    global FONT
-    for pat in ("AmiriQuran*.ttf", "*AmiriQuran*.ttf", "AmiriQuran*.otf", "*AmiriQuran*.otf"):
-        found = glob.glob("/usr/share/fonts/**/" + pat, recursive=True)
-        if found:
-            FONT = found[0]
-            log("PASS: لقيت الخط في النظام: " + FONT)
-            return
-    url = "https://github.com/google/fonts/raw/main/ofl/amiriquran/AmiriQuran-Regular.ttf"
-    r = requests.get(url, timeout=90, headers=HEADERS)
-    r.raise_for_status()
-    FONT = "/tmp/AmiriQuran-Regular.ttf"
-    with open(FONT, "wb") as f:
-        f.write(r.content)
-    log("PASS: نزّلت الخط من GitHub: " + FONT)
-
-
-# ---------------------------------------------------------------
-# 3. النص + مطابقة بين مصدرين
-# ---------------------------------------------------------------
-def normalize(s):
-    s = re.sub(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0640]", "", s)
-    s = re.sub(r"[أإآٱ]", "ا", s)
-    s = s.replace("ى", "ي").replace("ة", "ه")
-    return re.sub(r"\s+", " ", s).strip()
-
-
-BASMALA_N = normalize("بِسْمِ ٱللَّهِ ٱلرَّحْمَـٰنِ ٱلرَّحِيمِ")
-
-
-def same(na, nb, key):
-    """تساوي صارم. الاستثناء الوحيد: alquran.cloud بيحط البسملة قبل أول آية
-    في السور (ماعدا الفاتحة والتوبة)، فنشيلها بالظبط ونقارن بالمساواة."""
-    if na == nb:
-        return True
-    if key.endswith(":1") and not key.startswith(("1:", "9:")):
-        if nb.startswith(BASMALA_N + " ") and nb[len(BASMALA_N) + 1:] == na:
-            return True
-    return False
-
-
-def quran_com_chapter(ch):
-    j = get_json(QCOM + "/quran/verses/uthmani", chapter_number=ch)
-    return {v["verse_key"]: v["text_uthmani"] for v in j["verses"]}
-
-
-def alquran_cloud_all():
-    other = get_json("https://api.alquran.cloud/v1/quran/quran-uthmani")
-    b = {}
-    for s in other["data"]["surahs"]:
-        for a in s["ayahs"]:
-            b[f"{s['number']}:{a['numberInSurah']}"] = a["text"]
-    return b
-
-
-TEXT_112 = {}
-TEXT_255 = ""
-
-
-def test_text():
-    global TEXT_112, TEXT_255
-    TEXT_112 = quran_com_chapter(112)
-    log(f"PASS: Quran.com رجّع {len(TEXT_112)} آيات لسورة 112")
-    for k, v in TEXT_112.items():
-        log(f"  {k}: {v}")
-    j = get_json(QCOM + "/quran/verses/uthmani", verse_key="2:255")
-    TEXT_255 = j["verses"][0]["text_uthmani"]
-    log("PASS: آية الكرسي اتحمّلت (" + str(len(TEXT_255.split())) + " كلمة)")
-
-
-def test_cross_check():
-    """مطابقة هيكل الحروف (بدون التشكيل) بين Quran.com و alquran.cloud لكل القرآن"""
+def test_classify_diffs():
     b = alquran_cloud_all()
-    total, bad = 0, []
-    for ch in range(1, 115):
-        a = quran_com_chapter(ch)
-        for k, v in a.items():
-            total += 1
-            if not same(normalize(v), normalize(b.get(k, "")), k):
-                bad.append(k)
-    if bad:
-        log(f"WARN: {len(bad)} آية من {total} مختلفة بين المصدرين. أول 15: {bad[:15]}")
-    else:
-        log(f"PASS: {total} آية متطابقة (هيكل الحروف) بين المصدرين")
-    log("ملاحظة: المطابقة دي للحروف بس، والتشكيل بنعتمد فيه على مصدر Quran.com.")
-
-
-# ---------------------------------------------------------------
-# 4. الصوت والتوقيت
-# ---------------------------------------------------------------
-def resolve_audio_url(u):
-    if u.startswith("http"):
-        return u
-    return "https://audio.qurancdn.com/" + u.lstrip("/")
-
-
-def check_download(url):
-    r = requests.get(url, stream=True, timeout=60, headers=HEADERS)
-    status = r.status_code
-    size = r.headers.get("content-length", "?")
-    ctype = r.headers.get("content-type", "?")
-    first = next(r.iter_content(2048), b"")
-    r.close()
-    return f"status={status} type={ctype} size={size} first_bytes={len(first)}"
-
-
-def test_reciters_lists():
-    pat = re.compile(r"minsh|mansh|dos|dus", re.I)
-    hits = []
-    try:
-        j = get_json(QCOM + "/resources/chapter_reciters")
-        log("-- chapter_reciters المطابقة:")
-        for r in j.get("reciters", []):
-            if pat.search(json.dumps(r, ensure_ascii=False)):
-                log("  " + json.dumps(r, ensure_ascii=False))
-    except Exception as e:
-        log(f"-- chapter_reciters: FAIL {e}")
-    try:
-        j = get_json(QCOM + "/resources/recitations")
-        log("-- recitations (آية-آية) المطابقة:")
-        for r in j.get("recitations", []):
-            if pat.search(json.dumps(r, ensure_ascii=False)):
-                log("  " + json.dumps(r, ensure_ascii=False))
-                hits.append(r["id"])
-    except Exception as e:
-        log(f"-- recitations: FAIL {e}")
-    return hits
-
-
-def test_chapter_audio(reciter_id, label):
-    j = get_json(f"{QCOM}/chapter_recitations/{reciter_id}/112", segments="true")
-    af = j["audio_file"]
-    url = resolve_audio_url(af["audio_url"])
-    log(f"PASS: {label} (reciter {reciter_id}) رجّع ملف صوت: {url}")
-    log("  duration: " + str(af.get("duration")))
-    vt = af.get("verse_timings") or []
-    log(f"  عدد توقيتات الآيات: {len(vt)}")
-    for t in vt[:4]:
-        log("  " + json.dumps({k: t.get(k) for k in ("verse_key", "timestamp_from", "timestamp_to", "duration")}))
-    if not vt:
-        log("  WARN: مفيش verse_timings، هنحتاج مصدر توقيت تاني")
-    log("  تحميل: " + check_download(url))
-
-
-def test_verse_audio(recitation_ids):
-    if not recitation_ids:
-        log("مفيش recitation ids نختبرها (4a ما رجّعتش نتايج)")
-        return
-    for rid in recitation_ids:
-        try:
-            j = get_json(f"{QCOM}/recitations/{rid}/by_ayah/112:1")
-            files = j.get("audio_files", [])
-            if not files:
-                log(f"  recitation {rid}: مفيش ملفات")
-                continue
-            url = resolve_audio_url(files[0]["url"])
-            log(f"PASS: recitation {rid} آية 112:1 -> {url}")
-            log("  تحميل: " + check_download(url))
-        except Exception as e:
-            log(f"  recitation {rid}: FAIL {e}")
-
-
-# ---------------------------------------------------------------
-# 5. الرسم
-# ---------------------------------------------------------------
-def glyph_coverage(text):
-    from fontTools.ttLib import TTFont
-    cmap = TTFont(FONT, fontNumber=0, lazy=True).getBestCmap()
-    return sorted({hex(ord(c)) for c in text if not c.isspace() and ord(c) not in cmap})
-
-
-def wrap_lines(text, font, max_w):
-    lines, cur = [], ""
-    for w in text.split():
-        t = (cur + " " + w).strip()
-        if font.getlength(t, direction="rtl", language="ar") <= max_w:
-            cur = t
-        else:
-            lines.append(cur)
-            cur = w
-    if cur:
-        lines.append(cur)
-    return lines
-
-
-def render_ayah(text, path, title):
-    W, H = 1080, 1920
-    img = Image.new("RGB", (W, H), (8, 20, 28))
-    d = ImageDraw.Draw(img)
-    d.rectangle((40, 40, W - 40, H - 40), outline=(212, 175, 55), width=4)
-    size = 120  # الحد الأقصى للآيات القصيرة
-    while True:
-        font = ImageFont.truetype(FONT, size, layout_engine=ImageFont.Layout.RAQM)
-        lines = wrap_lines(text, font, W - 200)
-        line_h = int(size * 2.1)  # مسافة أكبر عشان علامات الوقف
-        if len(lines) * line_h <= 1100 or size <= 40:
-            break
-        size -= 4
-    small = ImageFont.truetype(FONT, 56, layout_engine=ImageFont.Layout.RAQM)
-    d.text((W // 2, 110), title, font=small, fill=(212, 175, 55), anchor="ma",
-           direction="rtl", language="ar")
-    y = (H - len(lines) * line_h) // 2
-    for ln in lines:
-        d.text((W // 2, y), ln, font=font, fill=(255, 255, 255), anchor="ma",
-               direction="rtl", language="ar")
-        y += line_h
-    img.save(path)
-    return size, len(lines)
-
-
-def test_render():
-    samples = [
-        ("112:1", TEXT_112.get("112:1", ""), "سورة الإخلاص", "probe_112_1.png"),
-        ("112:4", TEXT_112.get("112:4", ""), "سورة الإخلاص", "probe_112_4.png"),
-        ("2:255", TEXT_255, "سورة البقرة", "probe_2_255.png"),
-    ]
-    for key, text, title, fname in samples:
-        if not text:
-            log(f"SKIP {key}: النص مش متاح")
-            continue
-        num = key.split(":")[1].translate(ARABIC_DIGITS)
-        full = f"{text} \u06dd{num}"            # علامة نهاية الآية + الرقم
-        missing = glyph_coverage(full)
-        if missing:
-            log(f"FAIL {key}: رموز ناقصة في الخط: {missing}")
-        else:
-            log(f"PASS {key}: الخط فيه كل رموز الآية")
-        size, n = render_ayah(full, os.path.join(OUT, fname), title)
-        log(f"  اترسمت: {fname} (خط {size}، {n} سطر)")
-
-
-# ---------------------------------------------------------------
-# 6. JSON الخام للتوقيت
-# ---------------------------------------------------------------
-def test_raw_timing():
-    """يطبع الـ JSON الخام لتوقيت السورة، عشان نشوف شكله الحقيقي"""
-    for rid in (9, 97):
-        for params in ({"segments": "true"}, {}):
-            try:
-                j = get_json(f"{QCOM}/chapter_recitations/{rid}/112", **params)
-                log(f"-- reciter {rid} params={params}")
-                log(json.dumps(j, ensure_ascii=False)[:1500])
-            except Exception as e:
-                log(f"-- reciter {rid} params={params}: FAIL {e}")
-
-    # endpoint تاني ممكن يرجّع التوقيت
-    for rid in (9, 97):
-        try:
-            j = get_json(f"{QCOM}/quran/recitations/{rid}", chapter_number=112)
-            log(f"-- quran/recitations/{rid}: " + json.dumps(j, ensure_ascii=False)[:800])
-        except Exception as e:
-            log(f"-- quran/recitations/{rid}: FAIL {e}")
-
-
-# ---------------------------------------------------------------
-# 7. everyayah
-# ---------------------------------------------------------------
-def test_everyayah():
-    """HEAD على آية واحدة لكل قارئ محتمل في everyayah"""
-    base = "https://everyayah.com/data/"
-    candidates = [
-        "Minshawy_Murattal_128kbps",
-        "Minshawy_Mujawwad_192kbps",
-        "Yasser_Ad-Dussary_128kbps",
-    ]
-    for c in candidates:
-        url = f"{base}{c}/001001.mp3"
-        try:
-            r = requests.head(url, timeout=30, headers=HEADERS, allow_redirects=True)
-            log(f"{c}: status={r.status_code} size={r.headers.get('content-length')}")
-        except Exception as e:
-            log(f"{c}: FAIL {e}")
-
-    # محاولة قراءة قايمة القراء الفعلية من everyayah
-    try:
-        r = requests.get("https://everyayah.com/data/recitations.js", timeout=60, headers=HEADERS)
-        log(f"recitations.js: status={r.status_code}")
-        if r.ok:
-            pat = re.compile(r"minsh|dus|dos", re.I)
-            hits = [ln.strip() for ln in r.text.splitlines() if pat.search(ln)]
-            log(f"  أسطر مطابقة ({len(hits)}):")
-            for h in hits[:20]:
-                log("  " + h[:200])
-    except Exception as e:
-        log(f"recitations.js: FAIL {e}")
-
-
-# ---------------------------------------------------------------
-# 8. فروق الآيات بين المصدرين
-# ---------------------------------------------------------------
-def test_diff_276():
-    """يطبع فروق الآيات المختلفة بين المصدرين ويحفظها في diffs.txt"""
-    b = alquran_cloud_all()
-    lines = []
+    cats = collections.Counter()
+    real = []
     for ch in range(1, 115):
         for k, v in quran_com_chapter(ch).items():
-            na, nb = normalize(v), normalize(b.get(k, ""))
-            if not same(na, nb, k):
+            na = normalize(v)
+            nb = normalize(b.get(k, "").replace("\ufeff", ""))  # BOM في أول نص alquran.cloud
+            if same(na, nb, k):
+                cats["متطابقة"] += 1
+                continue
+            ha, hb = na.replace("ء", ""), nb.replace("ء", "")
+            if ha == hb:
+                cats["فرق في ترميز الهمزة فقط"] += 1
+            elif ha.replace(" ", "") == hb.replace(" ", ""):
+                cats["فرق في المسافات بين الكلمات (مع/بدون همزة)"] += 1
+            else:
+                cats["فرق حقيقي: لازم مراجعة"] += 1
                 sm = difflib.SequenceMatcher(None, na, nb)
-                diffs = [(op, na[i1:i2], nb[j1:j2])
-                         for op, i1, i2, j1, j2 in sm.get_opcodes() if op != "equal"]
-                lines.append(f"{k}: {diffs}")
-    with open(os.path.join(OUT, "diffs.txt"), "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-    log(f"اتكتب {len(lines)} فرق في probe_output/diffs.txt")
-    for l in lines[:25]:
-        log("  " + l)
+                d = [(op, na[i1:i2], nb[j1:j2])
+                     for op, i1, i2, j1, j2 in sm.get_opcodes() if op != "equal"]
+                real.append(f"{k}: {d}\n   quran.com: {na}\n   alquran  : {nb}")
+    for name, n in cats.most_common():
+        log(f"  {name}: {n}")
+    with open(os.path.join(OUT, "diffs_real.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(real))
+    log(f"اتكتب {len(real)} فرق حقيقي في {OUT}/diffs_real.txt")
+    for r in real[:30]:
+        log("  " + r)
 
 
 # ---------------------------------------------------------------
-if __name__ == "__main__":
-    run("1. محرك الرسم RAQM", test_raqm)
-    run("2. الخط", test_font)
-    run("3. نص الآيات", test_text)
-    run("3b. مطابقة المصدرين (كل القرآن)", test_cross_check)
-    rec_ids = run("4a. قوائم القراء", test_reciters_lists) or []
-    run("4b. صوت السورة كاملة + التوقيت: المنشاوي (9)", lambda: test_chapter_audio(9, "المنشاوي"))
-    run("4c. صوت السورة كاملة + التوقيت: الدوسري (97)", lambda: test_chapter_audio(97, "الدوسري"))
-    run("4d. صوت آية-آية للقراء المطابقين", lambda: test_verse_audio(rec_ids))
-    run("5. رسم الآيات بالخط", test_render)
-    run("6. JSON الخام للتوقيت", test_raw_timing)
-    run("7. everyayah", test_everyayah)
-    run("8. فروق الآيات بين المصدرين", test_diff_276)
+# ب) صحة التوقيت
+# ---------------------------------------------------------------
+def have_ffmpeg():
+    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 
-    with open(os.path.join(OUT, "report.txt"), "w", encoding="utf-8") as f:
+
+def duration(path):
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=nw=1:nk=1", path],
+        capture_output=True, text=True)
+    return float(r.stdout.strip())
+
+
+def cut(src, start, dur, dst):
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{start:.3f}", "-i", src,
+         "-t", f"{dur:.3f}", "-acodec", "libmp3lame", "-q:a", "2", dst],
+        check=True)
+
+
+def download(url, path):
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        return
+    r = requests.get(url, timeout=120, headers=HEADERS)
+    r.raise_for_status()
+    with open(path, "wb") as f:
+        f.write(r.content)
+
+
+def test_timing():
+    if not have_ffmpeg():
+        log("FAIL: ffmpeg/ffprobe مش متثبتين (على Colab: !apt-get install -y ffmpeg)")
+        return
+    ok = check = 0
+    for name, cfg in RECITERS.items():
+        for ch in CHAPTERS:
+            j = get_json(f"{QCOM}/chapter_recitations/{cfg['chapter_id']}/{ch}", segments="true")
+            af = j["audio_file"]
+            ts = af.get("timestamps") or []
+            log(f"-- {name} سورة {ch}: {len(ts)} توقيت")
+            if not ts:
+                log("   WARN: مفيش توقيت للسورة دي")
+                continue
+            chap = os.path.join(OUT, "chapters", f"{name}_{ch:03d}.mp3")
+            download(af["audio_url"], chap)
+            real = duration(chap)
+            log(f"   مدة الملف={real:.2f}s | آخر توقيت={ts[-1]['timestamp_to'] / 1000:.2f}s | "
+                f"file_size في الـ API={af.get('file_size')} | الفعلي={os.path.getsize(chap)}")
+            for t in ts:
+                c, v = (int(x) for x in t["verse_key"].split(":"))
+                start = t["timestamp_from"] / 1000
+                slice_d = (t["timestamp_to"] - t["timestamp_from"]) / 1000
+                cut(chap, start, slice_d, os.path.join(OUT, "slices", f"{name}_{c:03d}{v:03d}.mp3"))
+                for src, tpl in cfg["per_ayah"].items():
+                    p = os.path.join(OUT, "per_ayah", f"{name}_{src}_{c:03d}{v:03d}.mp3")
+                    try:
+                        download(tpl.format(c=c, v=v), p)
+                        d = duration(p)
+                    except Exception as e:
+                        log(f"   {c}:{v} {src}: FAIL {e}")
+                        continue
+                    diff = d - slice_d
+                    flag = "OK" if abs(diff) <= TOL else "CHECK"
+                    ok += flag == "OK"
+                    check += flag == "CHECK"
+                    log(f"   {c}:{v} {src}: مقطع={slice_d:.2f}s | آية جاهزة={d:.2f}s | فرق={diff:+.2f} {flag}")
+    log("")
+    log(f"الخلاصة: OK={ok} CHECK={check} (الفروق الصغيرة طبيعية بسبب الوقفات؛ المهم الفروق بالثواني)")
+    log(f"المقاطع للسماع في {OUT}/slices (اسمها: القارئ_سورة3أرقام+آية3أرقام)")
+
+
+if __name__ == "__main__":
+    run("أ. تصنيف فروق النص بين المصدرين", test_classify_diffs)
+    run("ب. صحة التوقيت مقابل ملفات الآيات الجاهزة", test_timing)
+    with open(os.path.join(OUT, "report2.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(REPORT))
-    print("\nتم. النتيجة في probe_output/report.txt")
+    print(f"\nتم. النتيجة في {OUT}/report2.txt")
