@@ -29,8 +29,6 @@ if not os.path.exists(FONT_PATH):
     if matches:
         FONT_PATH = matches[0]
 
-PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY", "")
-
 # --- 1. إدارة قاعدة البيانات لمنع التكرار ---
 def init_db():
     conn = sqlite3.connect("quran_clips.db")
@@ -55,17 +53,14 @@ def mark_clip_done(conn, surah, start_ayah, end_ayah, reciter, duration):
 
 # --- 2. جلب نصوص الآيات والتوقيتات واسم السورة ---
 def fetch_surah_data(surah_num, reciter_id):
-    # اسم السورة الرسمي بالعربي
     r_info = requests.get(f"{QCOM}/chapters/{surah_num}", headers=HEADERS, timeout=60)
     r_info.raise_for_status()
     surah_name_ar = r_info.json()["chapter"]["name_arabic"]
 
-    # نصوص الآيات بالرسم العثماني
     r_text = requests.get(f"{QCOM}/quran/verses/uthmani", params={"chapter_number": surah_num}, headers=HEADERS, timeout=60)
     r_text.raise_for_status()
     verses_text = {int(v["verse_key"].split(":")[1]): v["text_uthmani"] for v in r_text.json()["verses"]}
 
-    # التوقيتات والصوت
     r_audio = requests.get(f"{QCOM}/chapter_recitations/{reciter_id}/{surah_num}", params={"segments": "true"}, headers=HEADERS, timeout=60)
     r_audio.raise_for_status()
     data = r_audio.json()["audio_file"]
@@ -92,7 +87,7 @@ def find_next_clip(conn, surah_num, timestamps, reciter_key):
     last_ended = row[0] if row and row[0] is not None else 0
     
     if last_ended >= total_ayahs:
-        return None  # اكتملت السورة بالكامل
+        return None
 
     start = last_ended + 1
     end = start
@@ -100,11 +95,9 @@ def find_next_clip(conn, surah_num, timestamps, reciter_key):
     while end <= total_ayahs:
         dur = timestamps[end]["to"] - timestamps[start]["from"]
         
-        # النطاق الذهبي بين 25 و 65 ثانية
         if 25.0 <= dur <= 65.0:
             return start, end, dur
         
-        # في حال تخطي الحد الأقصى
         if dur > 65.0:
             if start == end:
                 return start, end, dur
@@ -112,34 +105,42 @@ def find_next_clip(conn, surah_num, timestamps, reciter_key):
             return start, end - 1, prev_dur
         end += 1
 
-    # ما تبقى من السورة إن وُجد
     rem_dur = timestamps[total_ayahs]["to"] - timestamps[start]["from"]
     if rem_dur >= 10.0:
         return start, total_ayahs, rem_dur
 
     return None
 
-# --- 4. جلب فيديو طبيعي بجودة عالية من Pixabay ---
+# --- 4. جلب فيديو طبيعي بدون بشر من Pixabay بدقة وجودة عالية ---
 def get_pixabay_video(min_duration):
-    if not PIXABAY_API_KEY:
-        print("[!] لم يتم العثور على PIXABAY_API_KEY، سيتم استخدام خلفية رقمية داكنة.")
+    key = os.environ.get("PIXABAY_API_KEY", "").strip()
+    if not key:
+        print("[!] لم يتم العثور على PIXABAY_API_KEY في متغيرات البيئة.")
         return None
 
-    queries = ["nature", "waterfall", "sea waves", "mountains clouds", "forest aerial", "desert dunes"]
+    queries = ["waterfall", "sea ocean", "clouds sky", "mountains", "forest trees"]
     query = random.choice(queries)
-    url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={requests.utils.quote(query)}&per_page=30"
+    url = "https://pixabay.com/api/videos/"
+    params = {
+        "key": key,
+        "q": query,
+        "video_type": "film",
+        "per_page": 50
+    }
 
     try:
-        r = requests.get(url, timeout=30)
+        r = requests.get(url, params=params, headers=HEADERS, timeout=30)
         data = r.json()
         hits = data.get("hits", [])
         
         valid_hits = [h for h in hits if h.get("duration", 0) >= 10]
         if not valid_hits:
+            print(f"[!] لم يتم العثور على مقاطع مناسبة لكلمة: {query}")
             return None
 
         chosen = random.choice(valid_hits)
         videos = chosen.get("videos", {})
+        
         target = videos.get("large") or videos.get("medium") or videos.get("small")
         if not target or not target.get("url"):
             return None
@@ -147,19 +148,28 @@ def get_pixabay_video(min_duration):
         video_url = target["url"]
         bg_path = os.path.join(TEMP_DIR, "pixabay_bg.mp4")
         print(f"[*] جاري تحميل فيديو طبيعة ({query}) من Pixabay...")
-        
-        with requests.get(video_url, stream=True, timeout=90) as stream_res:
+
+        dl_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        }
+        with requests.get(video_url, headers=dl_headers, stream=True, timeout=90) as stream_res:
             stream_res.raise_for_status()
             with open(bg_path, "wb") as f:
                 for chunk in stream_res.iter_content(chunk_size=1024 * 512):
                     f.write(chunk)
-                    
-        return bg_path
+
+        if os.path.exists(bg_path) and os.path.getsize(bg_path) > 100000:
+            print(f"[✓] تم تحميل فيديو الخلفية بنجاح! الحجم: {os.path.getsize(bg_path)} بايت")
+            return bg_path
+        else:
+            print("[!] الملف المحمّل تالف أو حجمه غير مناسب.")
+            return None
+
     except Exception as e:
         print(f"[!] خطأ أثناء سحب فيديو Pixabay: {e}")
         return None
 
-# --- 5. محرك رسم وتنسيق الآيات بشفافية وظل ---
+# --- 5. محرك رسم الآيات بشفافية وخط مصغر ومظلل ---
 def wrap_lines(text, font, max_w):
     lines, cur = [], ""
     for w in text.split():
@@ -178,7 +188,6 @@ def render_ayah_slide(text, ayah_num, surah_name_ar, reciter_title, out_path):
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    # الترويسة: اسم السورة + القارئ
     header_font = ImageFont.truetype(FONT_PATH, 50, layout_engine=ImageFont.Layout.RAQM)
     header_text = f"سورة {surah_name_ar} | {reciter_title}"
     d.text((W // 2, 160), header_text, font=header_font, fill=(235, 195, 80, 255), anchor="ma", direction="rtl", language="ar")
@@ -186,7 +195,6 @@ def render_ayah_slide(text, ayah_num, surah_name_ar, reciter_title, out_path):
     num_ar = str(ayah_num).translate(ARABIC_DIGITS)
     full_text = f"{text} \u06dd{num_ar}"
 
-    # تصغير حجم الخط ليكون مريحاً وأنيقاً
     size = 85
     while size >= 40:
         font = ImageFont.truetype(FONT_PATH, size, layout_engine=ImageFont.Layout.RAQM)
@@ -205,7 +213,7 @@ def render_ayah_slide(text, ayah_num, surah_name_ar, reciter_title, out_path):
 
     img.save(out_path, "PNG")
 
-# --- 6. الإنتاج النهائي عبر FFmpeg ---
+# --- 6. الإنتاج النهائي عبر FFmpeg مع عزل صوت الخلفية بالكامل وتطبيق Fade ---
 def generate_video(surah_num=2, reciter_key="minshawi"):
     conn = init_db()
     reciter_info = RECITERS[reciter_key]
@@ -242,12 +250,12 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
         a_to = timestamps[ayah]["to"] - t_start
         slide_files.append((slide_path, a_from, a_to))
 
-    # 3. إعداد الخلفية وعزل صوتها تماماً
+    # 3. إعداد الخلفية وعزل أي صوت فيها نهائياً
     bg_video = get_pixabay_video(duration)
     inputs = []
 
     if bg_video and os.path.exists(bg_video):
-        # -an تمنع استيراد أي مسار صوتي من فيديو Pixabay إطلاقاً
+        # -an تمنع استيراد أي صوت من فيديو Pixabay نهائياً
         inputs.extend(["-stream_loop", "-1", "-an", "-i", bg_video])
         base_filter = "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,drawbox=t=fill:c=black@0.45[bg];"
         last_label = "[bg]"
@@ -256,7 +264,7 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
         base_filter = ""
         last_label = "[0:v]"
 
-    # 4. بناء حركة Fade In / Fade Out لكل آية بنعومة
+    # 4. بناء حركة Fade In / Fade Out تدريجية لكل آية
     fade_d = 0.4
     filter_chains = base_filter
     idx = 1
@@ -278,10 +286,9 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
         last_label = next_label
         idx += 1
 
-    # تسمية الملف باسم قياسي لتفادي مشاكل المسارات في Bash
     out_file = os.path.join(OUT_DIR, f"Surah_{surah_num}_{start_ayah}-{end_ayah}_{reciter_key}.mp4")
 
-    # الصوت المعتمد الوحيد هو صوت التلاوة فقط
+    # نحدد عبر -map الصوت الخاص بالتلاوة فقط
     cmd = [
         "ffmpeg", "-y",
         *inputs,
@@ -295,7 +302,7 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
         out_file
     ]
 
-    print("[*] جاري المعالجة وتصدير الفيديو...")
+    print("[*] جاري المعالجة وتصدير الفيديو النهائي...")
     subprocess.run(cmd, check=True)
 
     mark_clip_done(conn, surah_num, start_ayah, end_ayah, reciter_key, duration)
