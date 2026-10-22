@@ -21,6 +21,9 @@ QCOM = "https://api.quran.com/api/v4"
 HEADERS = {"User-Agent": "quran-video-generator/1.0"}
 ARABIC_DIGITS = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
 
+# أقصى حد مسموح به لحجم الفيديو (100 ميجابايت)
+MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
+
 # المتغيرات الخاصة بـ GitHub و Make
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
@@ -218,7 +221,7 @@ def render_ayah_slide(text, ayah_num, surah_name_ar, reciter_title, out_path):
 
     img.save(out_path, "PNG")
 
-# --- 6. الإنتاج النهائي عبر FFmpeg مع عزل صوت الخلفية بالكامل وتطبيق Fade ---
+# --- 6. الإنتاج النهائي عبر FFmpeg مع ضغط الحجم وضمان عدم تجاوز 100 ميجا ---
 def generate_video(surah_num=2, reciter_key="minshawi"):
     conn = init_db()
     reciter_info = RECITERS[reciter_key]
@@ -292,6 +295,7 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
 
     out_file = os.path.join(OUT_DIR, f"Surah_{surah_num}_{start_ayah}-{end_ayah}_{reciter_key}.mp4")
 
+    # إعدادات ضغط عالية الكفاءة (تضمن حجماً صغيراً بحدود 10 ميجا وجودة 1080p عالية)
     cmd = [
         "ffmpeg", "-y",
         *inputs,
@@ -299,14 +303,29 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
         "-filter_complex", filter_chains.rstrip(";"),
         "-map", last_label,
         "-map", f"{idx}:a",
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k",
+        "-c:v", "libx264",
+        "-crf", "28",
+        "-preset", "veryfast",
+        "-b:v", "1500k",
+        "-maxrate", "2000k",
+        "-bufsize", "4000k",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "96k",
         "-t", str(duration),
         out_file
     ]
 
     print("[*] جاري المعالجة وتصدير الفيديو النهائي...")
     subprocess.run(cmd, check=True)
+
+    # التحقق من أن حجم الملف لا يتجاوز 100 ميجابايت
+    actual_size = os.path.getsize(out_file)
+    size_mb = actual_size / (1024 * 1024)
+    print(f"[*] حجم الفيديو النهائي: {size_mb:.2f} ميجابايت")
+
+    if actual_size > MAX_FILE_SIZE_BYTES:
+        raise ValueError(f"حجم الفيديو ({size_mb:.2f} MB) تجاوز الحد الأقصى المسموح به (100 MB)!")
 
     mark_clip_done(conn, surah_num, start_ayah, end_ayah, reciter_key, duration)
     print(f"[✓] تم حفظ الفيديو بنجاح: {out_file}")
