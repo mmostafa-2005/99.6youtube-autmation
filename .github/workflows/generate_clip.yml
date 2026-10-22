@@ -1,0 +1,50 @@
+name: Generate Quran Clip
+
+on:
+  workflow_dispatch: # يتيح لك تشغيله يدوياً بزر Run workflow
+  # schedule:
+  #   - cron: '0 12 * * *' # تشغيل تلقائي يومياً الساعة 12 ظهراً (لو حابب تفعلها)
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # لإتاحة حفظ وتحديث قاعدة البيانات داخل المستودع لمنع التكرار
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install System Dependencies (FFmpeg, RAQM, Fonts)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libraqm-dev libfribidi-dev fonts-hosny-amiri
+
+      - name: Install Python Packages
+        run: |
+          pip install --upgrade pip
+          pip install requests pillow fonttools
+
+      - name: Run Clip Generator
+        run: |
+          python3 quran_clip_generator.py
+
+      - name: Upload Generated Video as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quran-clips
+          path: generated_videos/*.mp4
+          retention-days: 7
+
+      - name: Save DB State (Commit & Push)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add quran_clips.db
+          git diff-index --quiet HEAD || git commit -m "chore: update quran clips database [skip ci]"
+          git push
