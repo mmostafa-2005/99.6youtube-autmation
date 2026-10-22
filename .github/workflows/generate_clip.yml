@@ -1,7 +1,10 @@
-name: Generate Quran Clip
+name: Generate and Publish Quran Clip
 
 on:
-  workflow_dispatch:
+  schedule:
+    # يعمل 4 مرات يومياً: 2 الظهر، 5 المغرب، 8 بالليل، 10 بالليل (توقيت مصر / السعودية)
+    - cron: '0 11,14,17,19 * * *'
+  workflow_dispatch: # يتيح لك التشغيل اليدوي بزر Run workflow في أي وقت
 
 jobs:
   generate:
@@ -26,29 +29,15 @@ jobs:
       - name: Install Python Packages
         run: |
           pip install --upgrade pip
-          pip install requests pillow fonttools google-api-python-client google-auth-httplib2 google-auth-oauthlib
+          pip install requests pillow fonttools
 
-      - name: Run Clip Generator
+      - name: Run Clip Generator & Publish
         env:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
         run: |
           python3 quran_clip_generator.py
-
-      - name: Upload Video to Google Drive
-        env:
-          GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-        run: |
-          python3 drive_uploader.py
-
-      - name: Upload Direct MP4 to GitHub Releases
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: video-${{ github.run_number }}
-          name: Quran Clip #${{ github.run_number }}
-          files: generated_videos/*.mp4
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Save DB State (Commit & Push)
         run: |
