@@ -6,7 +6,7 @@ import subprocess
 import requests
 from PIL import Image, ImageDraw, ImageFont
 
-# --- الإعدادات الأساسية ---
+# --- الإعدادات الأساسية ومتغيرات البيئة ---
 RECITERS = {
     "minshawi": {"id": 9, "name": "محمد صديق المنشاوي"},
     "dussary": {"id": 97, "name": "ياسر الدوسري"}
@@ -20,6 +20,11 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 QCOM = "https://api.quran.com/api/v4"
 HEADERS = {"User-Agent": "quran-video-generator/1.0"}
 ARABIC_DIGITS = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
+
+# المتغيرات الخاصة بـ GitHub و Make
+MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY")
 
 # البحث التلقائي عن مسار خط المصحف
 FONT_PATH = "/usr/share/fonts/opentype/fonts-hosny-amiri/AmiriQuran.ttf"
@@ -224,7 +229,7 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
     clip_info = find_next_clip(conn, surah_num, timestamps, reciter_key)
     if not clip_info:
         print("[!] لا توجد آيات جديدة مؤهلة للإنتاج في هذه السورة.")
-        return
+        return None, None
 
     start_ayah, end_ayah, duration = clip_info
     print(f"[+] سورة {surah_name_ar}: من الآية {start_ayah} إلى {end_ayah} (المدة: {duration:.2f} ثانية)")
@@ -255,7 +260,6 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
     inputs = []
 
     if bg_video and os.path.exists(bg_video):
-        # -an تمنع استيراد أي صوت من فيديو Pixabay نهائياً
         inputs.extend(["-stream_loop", "-1", "-an", "-i", bg_video])
         base_filter = "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,drawbox=t=fill:c=black@0.45[bg];"
         last_label = "[bg]"
@@ -288,7 +292,6 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
 
     out_file = os.path.join(OUT_DIR, f"Surah_{surah_num}_{start_ayah}-{end_ayah}_{reciter_key}.mp4")
 
-    # نحدد عبر -map الصوت الخاص بالتلاوة فقط
     cmd = [
         "ffmpeg", "-y",
         *inputs,
@@ -308,5 +311,77 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
     mark_clip_done(conn, surah_num, start_ayah, end_ayah, reciter_key, duration)
     print(f"[✓] تم حفظ الفيديو بنجاح: {out_file}")
 
+    clip_title = f"سورة {surah_name_ar} (الآيات {start_ayah}-{end_ayah}) | القارئ {reciter_info['name']} #قرآن #shorts"
+    return out_file, clip_title
+
+# --- 7. رفع الفيديو إلى GitHub Releases وإشعار Make.com ---
+def upload_to_github_release(video_path, tag_name="latest"):
+    if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
+        print("[!] بيانات GitHub Token أو المستودع غير متوفرة لرفع الـ Release.")
+        return None
+
+    file_name = os.path.basename(video_path)
+    print(f"[*] جاري رفع الفيديو {file_name} إلى GitHub Releases...")
+
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json"
+    }
+
+    release_url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/tags/{tag_name}"
+    res = requests.get(release_url, headers=headers)
+    
+    if res.status_code == 200:
+        release_id = res.json()["id"]
+        for asset in res.json().get("assets", []):
+            if asset["name"] == file_name:
+                requests.delete(asset["url"], headers=headers)
+    else:
+        create_url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases"
+        data = {"tag_name": tag_name, "name": "Latest Quran Clip", "draft": False, "prerelease": False}
+        res_create = requests.post(create_url, headers=headers, json=data)
+        res_create.raise_for_status()
+        release_id = res_create.json()["id"]
+
+    upload_url = f"https://uploads.github.com/repos/{GITHUB_REPOSITORY}/releases/{release_id}/assets?name={file_name}"
+    upload_headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Content-Type": "video/mp4"
+    }
+    
+    with open(video_path, "rb") as f:
+        upload_res = requests.post(upload_url, headers=upload_headers, data=f)
+        upload_res.raise_for_status()
+        
+    direct_url = upload_res.json()["browser_download_url"]
+    print(f"[✓] تم رفع الفيديو بنجاح: {direct_url}")
+    return direct_url
+
+def notify_make(video_url, video_title):
+    if not MAKE_WEBHOOK_URL:
+        print("[!] تنبيه: لم يتم العثور على MAKE_WEBHOOK_URL في Secrets.")
+        return
+
+    payload = {
+        "video_url": video_url,
+        "title": video_title
+    }
+    
+    print("[*] إرسال بيانات النشر إلى Make.com...")
+    res = requests.post(MAKE_WEBHOOK_URL, json=payload)
+    if res.status_code in [200, 204]:
+        print("[✓] استلم Make.com الطلب بنجاح وسيبدأ النشر الآن!")
+    else:
+        print(f"[!] خطأ أثناء إرسال البيانات إلى Make: {res.status_code} - {res.text}")
+
 if __name__ == "__main__":
-    generate_video(surah_num=2, reciter_key="minshawi")
+    # تشغيل التوليد
+    video_path, title = generate_video(surah_num=2, reciter_key="minshawi")
+    
+    if video_path and title:
+        # الرفع والحصول على الرابط المباشر
+        direct_link = upload_to_github_release(video_path)
+        
+        # إرسال الرابط للـ Webhook
+        if direct_link:
+            notify_make(direct_link, title)
