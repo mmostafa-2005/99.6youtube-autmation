@@ -1,0 +1,43 @@
+
+===== 1. محرك الرسم RAQM =====
+PASS: RAQM شغال
+
+===== 2. الخط =====
+PASS: لقيت الخط في النظام: /usr/share/fonts/opentype/fonts-hosny-amiri/AmiriQuran.ttf
+
+===== 3. نص الآيات =====
+PASS: Quran.com رجّع 4 آيات لسورة 112
+  112:1:  قُلْ هُوَ ٱللَّهُ أَحَدٌ
+  112:2: ٱللَّهُ ٱلصَّمَدُ
+  112:3: لَمْ يَلِدْ وَلَمْ يُولَدْ
+  112:4: وَلَمْ يَكُن لَّهُۥ كُفُوًا أَحَدٌۢ
+PASS: آية الكرسي اتحمّلت (58 كلمة)
+
+===== 3b. مطابقة المصدرين (كل القرآن) =====
+WARN: 276 آية من 6236 مختلفة بين المصدرين. أول 15: ['2:4', '2:8', '2:34', '2:62', '2:86', '2:94', '2:102', '2:114', '2:118', '2:126', '2:130', '2:164', '2:177', '2:181', '2:200']
+ملاحظة: المطابقة دي للحروف بس، والتشكيل بنعتمد فيه على مصدر Quran.com.
+
+===== 4a. قوائم القراء =====
+FAIL (HTTPError): 503 Server Error: Service Unavailable for url: https://api.quran.com/api/v4/resources/chapter_reciters
+
+===== 4b. صوت السورة كاملة + التوقيت: المنشاوي (9) =====
+PASS: المنشاوي (reciter 9) رجّع ملف صوت: https://download.quranicaudio.com/qdc/siddiq_minshawi/murattal/112.mp3
+  duration: None
+  عدد توقيتات الآيات: 0
+  WARN: مفيش verse_timings، هنحتاج مصدر توقيت تاني
+  تحميل: status=200 type=audio/mpeg size=231176 first_bytes=2048
+
+===== 4c. صوت السورة كاملة + التوقيت: الدوسري (97) =====
+PASS: الدوسري (reciter 97) رجّع ملف صوت: https://download.quranicaudio.com/quran/yasser_ad-dussary//112.mp3
+  duration: None
+  عدد توقيتات الآيات: 0
+  WARN: مفيش verse_timings، هنحتاج مصدر توقيت تاني
+  تحميل: status=200 type=audio/mpeg size=191104 first_bytes=2048
+
+===== 4d. صوت آية-آية للقراء المطابقين =====
+
+===== 5. رسم الآيات بالخط =====
+PASS 112:1: الخط فيه كل رموز الآية
+  اترسمت: probe_112_1.png (خط 96، 1 سطر)
+PASS 2:255: الخط فيه كل رموز الآية
+  اترسمت: probe_2_255.png (خط 72، 8 سطر)
