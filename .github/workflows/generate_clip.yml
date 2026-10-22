@@ -1,15 +1,13 @@
 name: Generate Quran Clip
 
 on:
-  workflow_dispatch: # يتيح لك تشغيله يدوياً بزر Run workflow
-  # schedule:
-  #   - cron: '0 12 * * *' # تشغيل تلقائي يومياً الساعة 12 ظهراً (لو حابب تفعلها)
+  workflow_dispatch: # تشغيل يدوي
 
 jobs:
   generate:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # لإتاحة حفظ وتحديث قاعدة البيانات داخل المستودع لمنع التكرار
+      contents: write # لحفظ وتحديث قاعدة البيانات داخل المستودع
 
     steps:
       - name: Checkout Repository
@@ -31,6 +29,8 @@ jobs:
           pip install requests pillow fonttools
 
       - name: Run Clip Generator
+        env:
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         run: |
           python3 quran_clip_generator.py
 
