@@ -23,10 +23,12 @@ ARABIC_DIGITS = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
 
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 
-# متغيرات GitHub و Make
+# متغيرات GitHub و Make و Telegram
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # البحث التلقائي عن مسار خط المصحف
 FONT_PATH = "/usr/share/fonts/opentype/fonts-hosny-amiri/AmiriQuran.ttf"
@@ -156,7 +158,6 @@ def get_pixabay_video(min_duration):
 
 # --- 5. تقسيم النصوص ورسم الشرائح بحجم 3 إلى 4 كلمات ---
 def chunk_text(words, min_w=3, max_w=4):
-    """تقسيم قائمة الكلمات إلى مقاطع متوازنة تتراوح بين 3 و 4 كلمات"""
     chunks = []
     i = 0
     total = len(words)
@@ -173,17 +174,14 @@ def chunk_text(words, min_w=3, max_w=4):
     return chunks
 
 def render_phrase_slide(phrase_text, surah_name_ar, reciter_title, out_path):
-    """رسم مقطع الكلمات في منتصف الشاشة بخط كبير وواضح"""
     W, H = 1080, 1920
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    # عنوان السورة والقارئ بالأعلى
     header_font = ImageFont.truetype(FONT_PATH, 50, layout_engine=ImageFont.Layout.RAQM)
     header_text = f"سورة {surah_name_ar} | {reciter_title}"
     d.text((W // 2, 160), header_text, font=header_font, fill=(235, 195, 80, 255), anchor="ma", direction="rtl", language="ar")
 
-    # تحديد حجم خط ملائم لعدد الكلمات
     font_size = 95
     font = ImageFont.truetype(FONT_PATH, font_size, layout_engine=ImageFont.Layout.RAQM)
     
@@ -192,10 +190,8 @@ def render_phrase_slide(phrase_text, surah_name_ar, reciter_title, out_path):
         font = ImageFont.truetype(FONT_PATH, font_size, layout_engine=ImageFont.Layout.RAQM)
 
     y = H // 2 - 40
-    # رسم الظل لزيادة الوضوح
     for dx, dy in [(-3, -3), (3, -3), (-3, 3), (3, 3), (0, 4)]:
         d.text((W // 2 + dx, y + dy), phrase_text, font=font, fill=(0, 0, 0, 240), anchor="ma", direction="rtl", language="ar")
-    # رسم النص الأبيض
     d.text((W // 2, y), phrase_text, font=font, fill=(255, 255, 255, 255), anchor="ma", direction="rtl", language="ar")
 
     img.save(out_path, "PNG")
@@ -216,7 +212,6 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
     start_ayah, end_ayah, duration = clip_info
     print(f"[+] سورة {surah_name_ar}: الآيات {start_ayah}-{end_ayah} (المدة: {duration:.2f} ثانية)")
 
-    # 1. تحميل وتجهيز الصوت
     full_audio_path = os.path.join(TEMP_DIR, f"full_{surah_num}_{reciter_key}.mp3")
     if not os.path.exists(full_audio_path):
         r = requests.get(audio_url, headers=HEADERS, timeout=120)
@@ -228,7 +223,6 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
     cut_audio = os.path.join(TEMP_DIR, "cut.mp3")
     subprocess.run(["ffmpeg", "-y", "-ss", str(t_start), "-to", str(t_end), "-i", full_audio_path, "-acodec", "copy", cut_audio], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # 2. توليد شرائح الكلمات
     slide_files = []
     slide_counter = 0
 
@@ -256,7 +250,6 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
             slide_files.append((slide_path, c_start, c_end))
             slide_counter += 1
 
-    # 3. تجهيز الخلفية
     bg_video = get_pixabay_video(duration)
     inputs = []
 
@@ -269,7 +262,6 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
         base_filter = ""
         last_label = "[0:v]"
 
-    # 4. دمج الشرائح مع حركة Fade تدريجية
     fade_d = 0.2
     filter_chains = base_filter
     idx = 1
@@ -293,7 +285,6 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
 
     out_file = os.path.join(OUT_DIR, f"Surah_{surah_num}_{start_ayah}-{end_ayah}_{reciter_key}.mp4")
 
-    # إعدادات الضغط والتصدير النهائي
     cmd = [
         "ffmpeg", "-y",
         *inputs,
@@ -330,7 +321,31 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
     clip_title = f"سورة {surah_name_ar} (الآيات {start_ayah}-{end_ayah}) | القارئ {reciter_info['name']} #قرآن #shorts"
     return out_file, clip_title
 
-# --- 7. رفع الفيديو إلى GitHub Releases وإشعار Make.com ---
+# --- 7. إرسال الفيديو والنص إلى Telegram ---
+def send_to_telegram(video_path, caption):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[!] بيانات Telegram غير مكتملة في Secrets، تم تخطي الإرسال.")
+        return
+
+    print("[*] جاري إرسال الفيديو والنص إلى تليجرام...")
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+    data = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "caption": caption[:1024],
+        "supports_streaming": True
+    }
+    try:
+        with open(video_path, "rb") as video_file:
+            files = {"video": video_file}
+            res = requests.post(url, data=data, files=files, timeout=120)
+        if res.status_code == 200:
+            print("[✓] تم استلام الفيديو على تليجرام بنجاح!")
+        else:
+            print(f"[!] فشل إرسال تليجرام: {res.status_code} - {res.text}")
+    except Exception as e:
+        print(f"[!] خطأ أثناء إرسال تليجرام: {e}")
+
+# --- 8. رفع الفيديو إلى GitHub Releases وإشعار Make.com ---
 def upload_to_github_release(video_path, tag_name="latest"):
     if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
         print("[!] بيانات GitHub Token غير متوفرة.")
@@ -389,6 +404,10 @@ def notify_make(video_url, video_title):
 if __name__ == "__main__":
     video_path, title = generate_video(surah_num=2, reciter_key="minshawi")
     if video_path and title:
+        # إرسال الفيديو لتليجرام أولاً
+        send_to_telegram(video_path, title)
+        
+        # رفع الفيديو وإشعار Make.com
         direct_link = upload_to_github_release(video_path)
         if direct_link:
             notify_make(direct_link, title)
