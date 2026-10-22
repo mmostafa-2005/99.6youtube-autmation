@@ -21,15 +21,12 @@ QCOM = "https://api.quran.com/api/v4"
 HEADERS = {"User-Agent": "quran-video-generator/1.0"}
 ARABIC_DIGITS = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
 
-# أقصى حد مسموح به لحجم الفيديو (100 ميجابايت)
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 
-# المتغيرات الخاصة بـ GitHub و Make
+# متغيرات GitHub و Make و TikTok
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY")
-
-# المتغيرات الخاصة بـ TikTok API
 TIKTOK_CLIENT_KEY = os.environ.get("TIKTOK_CLIENT_KEY")
 TIKTOK_CLIENT_SECRET = os.environ.get("TIKTOK_CLIENT_SECRET")
 TIKTOK_REFRESH_TOKEN = os.environ.get("TIKTOK_REFRESH_TOKEN")
@@ -42,7 +39,7 @@ if not os.path.exists(FONT_PATH):
     if matches:
         FONT_PATH = matches[0]
 
-# --- 1. إدارة قاعدة البيانات لمنع التكرار ---
+# --- 1. إدارة قاعدة البيانات ---
 def init_db():
     conn = sqlite3.connect("quran_clips.db")
     c = conn.cursor()
@@ -64,7 +61,7 @@ def mark_clip_done(conn, surah, start_ayah, end_ayah, reciter, duration):
               (surah, start_ayah, end_ayah, reciter, duration))
     conn.commit()
 
-# --- 2. جلب نصوص الآيات والتوقيتات واسم السورة ---
+# --- 2. جلب نصوص الآيات والتوقيتات ---
 def fetch_surah_data(surah_num, reciter_id):
     r_info = requests.get(f"{QCOM}/chapters/{surah_num}", headers=HEADERS, timeout=60)
     r_info.raise_for_status()
@@ -90,10 +87,9 @@ def fetch_surah_data(surah_num, reciter_id):
 
     return surah_name_ar, verses_text, timestamps, audio_url
 
-# --- 3. اختيار المقطع غير المكرر بمرونة تامة ---
+# --- 3. اختيار المقطع غير المكرر ---
 def find_next_clip(conn, surah_num, timestamps, reciter_key):
     total_ayahs = len(timestamps)
-    
     c = conn.cursor()
     c.execute("SELECT MAX(end_ayah) FROM completed_clips WHERE surah=? AND reciter=?", (surah_num, reciter_key))
     row = c.fetchone()
@@ -107,10 +103,8 @@ def find_next_clip(conn, surah_num, timestamps, reciter_key):
 
     while end <= total_ayahs:
         dur = timestamps[end]["to"] - timestamps[start]["from"]
-        
         if 25.0 <= dur <= 65.0:
             return start, end, dur
-        
         if dur > 65.0:
             if start == end:
                 return start, end, dur
@@ -124,47 +118,33 @@ def find_next_clip(conn, surah_num, timestamps, reciter_key):
 
     return None
 
-# --- 4. جلب فيديو طبيعي بدون بشر من Pixabay بدقة وجودة عالية ---
+# --- 4. جلب فيديو الخلفية من Pixabay ---
 def get_pixabay_video(min_duration):
     key = os.environ.get("PIXABAY_API_KEY", "").strip()
     if not key:
-        print("[!] لم يتم العثور على PIXABAY_API_KEY في متغيرات البيئة.")
         return None
 
     queries = ["waterfall", "sea ocean", "clouds sky", "mountains", "forest trees"]
     query = random.choice(queries)
     url = "https://pixabay.com/api/videos/"
-    params = {
-        "key": key,
-        "q": query,
-        "video_type": "film",
-        "per_page": 50
-    }
+    params = {"key": key, "q": query, "video_type": "film", "per_page": 50}
 
     try:
         r = requests.get(url, params=params, headers=HEADERS, timeout=30)
-        data = r.json()
-        hits = data.get("hits", [])
-        
+        hits = r.json().get("hits", [])
         valid_hits = [h for h in hits if h.get("duration", 0) >= 10]
         if not valid_hits:
-            print(f"[!] لم يتم العثور على مقاطع مناسبة لكلمة: {query}")
             return None
 
         chosen = random.choice(valid_hits)
         videos = chosen.get("videos", {})
-        
         target = videos.get("large") or videos.get("medium") or videos.get("small")
         if not target or not target.get("url"):
             return None
 
         video_url = target["url"]
         bg_path = os.path.join(TEMP_DIR, "pixabay_bg.mp4")
-        print(f"[*] جاري تحميل فيديو طبيعة ({query}) من Pixabay...")
-
-        dl_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-        }
+        dl_headers = {"User-Agent": "Mozilla/5.0"}
         with requests.get(video_url, headers=dl_headers, stream=True, timeout=90) as stream_res:
             stream_res.raise_for_status()
             with open(bg_path, "wb") as f:
@@ -172,61 +152,60 @@ def get_pixabay_video(min_duration):
                     f.write(chunk)
 
         if os.path.exists(bg_path) and os.path.getsize(bg_path) > 100000:
-            print(f"[✓] تم تحميل فيديو الخلفية بنجاح! الحجم: {os.path.getsize(bg_path)} بايت")
             return bg_path
-        else:
-            print("[!] الملف المحمّل تالف أو حجمه غير مناسب.")
-            return None
-
     except Exception as e:
-        print(f"[!] خطأ أثناء سحب فيديو Pixabay: {e}")
-        return None
+        print(f"[!] خطأ Pixabay: {e}")
+    return None
 
-# --- 5. محرك رسم الآيات بشفافية وخط مصغر ومظلل ---
-def wrap_lines(text, font, max_w):
-    lines, cur = [], ""
-    for w in text.split():
-        t = (cur + " " + w).strip()
-        if font.getlength(t, direction="rtl", language="ar") <= max_w:
-            cur = t
+# --- 5. تقسيم النصوص ورسم الشرائح بحجم 3 إلى 4 كلمات ---
+def chunk_text(words, min_w=3, max_w=4):
+    """تقسيم قائمة الكلمات إلى مقاطع متوازنة تتراوح بين 3 و 4 كلمات"""
+    chunks = []
+    i = 0
+    total = len(words)
+    while i < total:
+        rem = total - i
+        # إذا تبقى 5 كلمات، نقسمها 3 ثم 2 أو 3 ثم 2 حتى لا تبقى كلمة يتيمة
+        if rem <= max_w:
+            take = rem
+        elif rem == 5:
+            take = 3
         else:
-            lines.append(cur)
-            cur = w
-    if cur:
-        lines.append(cur)
-    return lines
+            take = max_w
+        chunks.append(" ".join(words[i:i+take]))
+        i += take
+    return chunks
 
-def render_ayah_slide(text, ayah_num, surah_name_ar, reciter_title, out_path):
+def render_phrase_slide(phrase_text, surah_name_ar, reciter_title, out_path):
+    """رسم مقطع الكلمات بخط كبير وواضح في منتصف الشاشة"""
     W, H = 1080, 1920
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
+    # ترويسة الفيديو بالأعلى
     header_font = ImageFont.truetype(FONT_PATH, 50, layout_engine=ImageFont.Layout.RAQM)
     header_text = f"سورة {surah_name_ar} | {reciter_title}"
     d.text((W // 2, 160), header_text, font=header_font, fill=(235, 195, 80, 255), anchor="ma", direction="rtl", language="ar")
 
-    num_ar = str(ayah_num).translate(ARABIC_DIGITS)
-    full_text = f"{text} \u06dd{num_ar}"
+    # تحديد حجم خط كبير ومناسب للكلمات القليلة
+    font_size = 95
+    font = ImageFont.truetype(FONT_PATH, font_size, layout_engine=ImageFont.Layout.RAQM)
+    
+    # تصغير الخط في حال كانت الكلمات طويلة نسبياً على عرض الشاشة
+    while font.getlength(phrase_text, direction="rtl", language="ar") > (W - 200) and font_size > 50:
+        font_size -= 5
+        font = ImageFont.truetype(FONT_PATH, font_size, layout_engine=ImageFont.Layout.RAQM)
 
-    size = 85
-    while size >= 40:
-        font = ImageFont.truetype(FONT_PATH, size, layout_engine=ImageFont.Layout.RAQM)
-        lines = wrap_lines(full_text, font, W - 220)
-        line_h = int(size * 2.0)
-        if len(lines) * line_h <= 1100:
-            break
-        size -= 3
-
-    y = (H - len(lines) * line_h) // 2
-    for ln in lines:
-        for dx, dy in [(-2, -2), (2, -2), (-2, 2), (2, 2), (0, 3)]:
-            d.text((W // 2 + dx, y + dy), ln, font=font, fill=(0, 0, 0, 240), anchor="ma", direction="rtl", language="ar")
-        d.text((W // 2, y), ln, font=font, fill=(255, 255, 255, 255), anchor="ma", direction="rtl", language="ar")
-        y += line_h
+    y = H // 2 - 40
+    # رسم الظل الخارجي لضمان وضوح القراءة
+    for dx, dy in [(-3, -3), (3, -3), (-3, 3), (3, 3), (0, 4)]:
+        d.text((W // 2 + dx, y + dy), phrase_text, font=font, fill=(0, 0, 0, 240), anchor="ma", direction="rtl", language="ar")
+    # رسم النص الأساسي الأبيض
+    d.text((W // 2, y), phrase_text, font=font, fill=(255, 255, 255, 255), anchor="ma", direction="rtl", language="ar")
 
     img.save(out_path, "PNG")
 
-# --- 6. الإنتاج النهائي عبر FFmpeg مع ضغط الحجم وضمان عدم تجاوز 100 ميجا ---
+# --- 6. الإنتاج النهائي عبر FFmpeg ---
 def generate_video(surah_num=2, reciter_key="minshawi"):
     conn = init_db()
     reciter_info = RECITERS[reciter_key]
@@ -240,7 +219,7 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
         return None, None
 
     start_ayah, end_ayah, duration = clip_info
-    print(f"[+] سورة {surah_name_ar}: من الآية {start_ayah} إلى {end_ayah} (المدة: {duration:.2f} ثانية)")
+    print(f"[+] سورة {surah_name_ar}: الآيات {start_ayah}-{end_ayah} (المدة: {duration:.2f} ثانية)")
 
     # 1. تحميل وقص الصوت
     full_audio_path = os.path.join(TEMP_DIR, f"full_{surah_num}_{reciter_key}.mp3")
@@ -254,16 +233,36 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
     cut_audio = os.path.join(TEMP_DIR, "cut.mp3")
     subprocess.run(["ffmpeg", "-y", "-ss", str(t_start), "-to", str(t_end), "-i", full_audio_path, "-acodec", "copy", cut_audio], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # 2. توليد صور الآيات وتحديد أوقات الظهور
+    # 2. تقسيم الآيات إلى مقاطع صغيرة (3-4 كلمات) وحساب أوقاتها المتزامنة
     slide_files = []
+    slide_counter = 0
+
     for ayah in range(start_ayah, end_ayah + 1):
-        slide_path = os.path.join(TEMP_DIR, f"slide_{ayah}.png")
-        render_ayah_slide(verses_text[ayah], ayah, surah_name_ar, reciter_info["name"], slide_path)
+        num_ar = str(ayah).translate(ARABIC_DIGITS)
+        ayah_words = verses_text[ayah].split()
+        
+        # إضافة رمز ورقم الآية في نهاية آخر كلمة
+        if ayah_words:
+            ayah_words[-1] = f"{ayah_words[-1]} \u06dd{num_ar}"
+            
+        chunks = chunk_text(ayah_words, min_w=3, max_w=4)
+        num_chunks = len(chunks)
+        
         a_from = timestamps[ayah]["from"] - t_start
         a_to = timestamps[ayah]["to"] - t_start
-        slide_files.append((slide_path, a_from, a_to))
+        ayah_duration = max(0.1, a_to - a_from)
+        chunk_duration = ayah_duration / num_chunks
 
-    # 3. إعداد الخلفية وعزل أي صوت فيها نهائياً
+        for i, chunk in enumerate(chunks):
+            slide_path = os.path.join(TEMP_DIR, f"phrase_{slide_counter}.png")
+            render_phrase_slide(chunk, surah_name_ar, reciter_info["name"], slide_path)
+            
+            c_start = a_from + (i * chunk_duration)
+            c_end = a_from + ((i + 1) * chunk_duration)
+            slide_files.append((slide_path, c_start, c_end))
+            slide_counter += 1
+
+    # 3. إعداد الخلفية وعزل أي صوت فيها
     bg_video = get_pixabay_video(duration)
     inputs = []
 
@@ -276,15 +275,15 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
         base_filter = ""
         last_label = "[0:v]"
 
-    # 4. بناء حركة Fade In / Fade Out تدريجية لكل آية
-    fade_d = 0.4
+    # 4. دمج المقاطع مع انتقال Fade سريع (0.2 ثانية) لظهور واختفاء الكلمات بسلاسة
+    fade_d = 0.2
     filter_chains = base_filter
     idx = 1
 
-    for path, a_from, a_to in slide_files:
+    for path, c_from, c_to in slide_files:
         inputs.extend(["-loop", "1", "-t", str(duration), "-i", path])
-        f_in = a_from
-        f_out = max(a_from, a_to - fade_d)
+        f_in = c_from
+        f_out = max(c_from, c_to - fade_d)
 
         slide_faded = f"[slide_faded_{idx}]"
         filter_chains += (
@@ -294,13 +293,13 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
         )
         
         next_label = f"[v_mix_{idx}]"
-        filter_chains += f"{last_label}{slide_faded}overlay=0:0:enable='between(t,{a_from},{a_to})'{next_label};"
+        filter_chains += f"{last_label}{slide_faded}overlay=0:0:enable='between(t,{c_from},{c_to})'{next_label};"
         last_label = next_label
         idx += 1
 
     out_file = os.path.join(OUT_DIR, f"Surah_{surah_num}_{start_ayah}-{end_ayah}_{reciter_key}.mp4")
 
-    # إعدادات ضغط عالية الكفاءة (تضمن حجماً صغيراً بحدود 10 ميجا وجودة 1080p عالية)
+    # إعدادات التصدير والضغط
     cmd = [
         "ffmpeg", "-y",
         *inputs,
@@ -321,26 +320,24 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
         out_file
     ]
 
-    print("[*] جاري المعالجة وتصدير الفيديو النهائي...")
+    print("[*] جاري المعالجة وتصدير الفيديو النهائي عبر FFmpeg...")
     subprocess.run(cmd, check=True)
 
-    # التحقق من أن حجم الملف لا يتجاوز 100 ميجابايت
     actual_size = os.path.getsize(out_file)
     size_mb = actual_size / (1024 * 1024)
     print(f"[*] حجم الفيديو النهائي: {size_mb:.2f} ميجابايت")
 
     if actual_size > MAX_FILE_SIZE_BYTES:
-        raise ValueError(f"حجم الفيديو ({size_mb:.2f} MB) تجاوز الحد الأقصى المسموح به (100 MB)!")
+        raise ValueError(f"حجم الفيديو تجاوز 100 ميجا: {size_mb:.2f} MB")
 
     mark_clip_done(conn, surah_num, start_ayah, end_ayah, reciter_key, duration)
-    print(f"[✓] تم حفظ الفيديو بنجاح: {out_file}")
+    print(f"[✓] تم تصدير الفيديو بنجاح: {out_file}")
 
     clip_title = f"سورة {surah_name_ar} (الآيات {start_ayah}-{end_ayah}) | القارئ {reciter_info['name']} #قرآن #shorts"
     return out_file, clip_title
 
-# --- 7. دوال النشر على TikTok عبر Content Posting API ---
+# --- 7. دوال TikTok API ---
 def get_tiktok_access_token():
-    """تجديد توكن TikTok تلقائياً باستخدام Refresh Token"""
     url = "https://open.tiktokapis.com/v2/oauth/token/"
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     data = {
@@ -357,9 +354,8 @@ def get_tiktok_access_token():
     raise Exception(f"Failed to refresh TikTok access token: {res}")
 
 def upload_to_tiktok(video_path, title):
-    """رفع الفيديو إلى TikTok مباشرة"""
     if not all([TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET, TIKTOK_REFRESH_TOKEN]):
-        print("[!] بيانات TikTok API غير مكتملة في Secrets، تم تخطي الرفع إلى تيك توك.")
+        print("[!] بيانات TikTok API غير مكتملة، تم تخطي الرفع إلى تيك توك.")
         return
 
     print("[*] بدء رفع الفيديو إلى TikTok...")
@@ -375,7 +371,7 @@ def upload_to_tiktok(video_path, title):
         payload = {
             "post_info": {
                 "title": title[:150],
-                "privacy_level": "SELF_ONLY",  # في وضع Sandbox ينزل الفيديو كمسودة لحسابك
+                "privacy_level": "SELF_ONLY",
                 "disable_duet": False,
                 "disable_comment": False,
                 "disable_stitch": False
@@ -390,7 +386,7 @@ def upload_to_tiktok(video_path, title):
 
         init_res = requests.post(init_url, json=payload, headers=headers, timeout=30).json()
         if init_res.get("error", {}).get("code") != "ok":
-            print(f"[!] خطأ في تهيئة رفع TikTok: {init_res}")
+            print(f"[!] خطأ في تهيئة TikTok: {init_res}")
             return
 
         upload_url = init_res["data"]["upload_url"]
@@ -404,17 +400,16 @@ def upload_to_tiktok(video_path, title):
             upload_res = requests.put(upload_url, data=video_file, headers=upload_headers, timeout=120)
 
         if upload_res.status_code in [200, 201]:
-            print(f"[✓] تم الرفع بنجاح إلى TikTok! معرف النشر (Publish ID): {publish_id}")
+            print(f"[✓] تم الرفع بنجاح إلى TikTok! معرّف النشر: {publish_id}")
         else:
-            print(f"[!] فشل إرسال بايتات الفيديو إلى TikTok: {upload_res.status_code} - {upload_res.text}")
-
+            print(f"[!] فشل الرفع إلى TikTok: {upload_res.status_code} - {upload_res.text}")
     except Exception as e:
         print(f"[!] خطأ أثناء النشر على تيك توك: {e}")
 
 # --- 8. رفع الفيديو إلى GitHub Releases وإشعار Make.com ---
 def upload_to_github_release(video_path, tag_name="latest"):
     if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
-        print("[!] بيانات GitHub Token أو المستودع غير متوفرة لرفع الـ Release.")
+        print("[!] بيانات GitHub Token غير متوفرة.")
         return None
 
     file_name = os.path.basename(video_path)
@@ -456,14 +451,10 @@ def upload_to_github_release(video_path, tag_name="latest"):
 
 def notify_make(video_url, video_title):
     if not MAKE_WEBHOOK_URL:
-        print("[!] تنبيه: لم يتم العثور على MAKE_WEBHOOK_URL في Secrets.")
+        print("[!] تنبيه: MAKE_WEBHOOK_URL غير موجود.")
         return
 
-    payload = {
-        "video_url": video_url,
-        "title": video_title
-    }
-    
+    payload = {"video_url": video_url, "title": video_title}
     print("[*] إرسال بيانات النشر إلى Make.com...")
     res = requests.post(MAKE_WEBHOOK_URL, json=payload)
     if res.status_code in [200, 204]:
@@ -472,16 +463,12 @@ def notify_make(video_url, video_title):
         print(f"[!] خطأ أثناء إرسال البيانات إلى Make: {res.status_code} - {res.text}")
 
 if __name__ == "__main__":
-    # 1. تشغيل إنتاج الفيديو
     video_path, title = generate_video(surah_num=2, reciter_key="minshawi")
-    
     if video_path and title:
-        # 2. النشر المباشر على تيك توك
+        # الرفع لتيك توك أولاً
         upload_to_tiktok(video_path, title)
-
-        # 3. الرفع إلى GitHub Releases للحصول على الرابط المباشر
-        direct_link = upload_to_github_release(video_path)
         
-        # 4. إرسال الرابط إلى Make.com للنشر على يوتيوب، فيسبوك، وإنستغرام
+        # الرفع للـ Releases وإرسال Make
+        direct_link = upload_to_github_release(video_path)
         if direct_link:
             notify_make(direct_link, title)
