@@ -1,1 +1,107 @@
 
+===== 1. محرك الرسم RAQM =====
+PASS: RAQM شغال
+
+===== 2. الخط =====
+PASS: لقيت الخط في النظام: /usr/share/fonts/opentype/fonts-hosny-amiri/AmiriQuran.ttf
+
+===== 3. نص الآيات =====
+PASS: Quran.com رجّع 4 آيات لسورة 112
+  112:1:  قُلْ هُوَ ٱللَّهُ أَحَدٌ
+  112:2: ٱللَّهُ ٱلصَّمَدُ
+  112:3: لَمْ يَلِدْ وَلَمْ يُولَدْ
+  112:4: وَلَمْ يَكُن لَّهُۥ كُفُوًا أَحَدٌۢ
+PASS: آية الكرسي اتحمّلت (58 كلمة)
+
+===== 3b. مطابقة المصدرين (كل القرآن) =====
+WARN: 277 آية من 6236 مختلفة بين المصدرين. أول 15: ['1:1', '2:4', '2:8', '2:34', '2:62', '2:86', '2:94', '2:102', '2:114', '2:118', '2:126', '2:130', '2:164', '2:177', '2:181']
+ملاحظة: المطابقة لهيكل الحروف فقط، والتشكيل معتمد على مصحف Quran.com.
+
+===== 4a. قوائم القراء =====
+-- chapter_reciters المطابقة:
+WARN chapter_reciters فشل: 'NoneType' object has no attribute 'get'
+-- recitations (آية-آية) المطابقة:
+  {"id": 9, "reciter_name": "Mohamed Siddiq al-Minshawi", "style": "Murattal", "translated_name": {"name": "Mohamed Siddiq al-Minshawi", "language_name": "english"}}
+  {"id": 8, "reciter_name": "Mohamed Siddiq al-Minshawi", "style": "Mujawwad", "translated_name": {"name": "Mohamed Siddiq al-Minshawi", "language_name": "english"}}
+
+===== 4b. صوت السورة كاملة + التوقيت: المنشاوي (9) =====
+PASS: المنشاوي (reciter 9) رجّع ملف صوت: https://download.quranicaudio.com/qdc/siddiq_minshawi/murattal/112.mp3
+  duration: None
+  عدد توقيتات الآيات: 0
+  WARN: مفيش verse_timings، هنحتاج مصدر توقيت تاني
+  تحميل: status=200 type=audio/mpeg size=231176 first_bytes=2048
+
+===== 4c. صوت السورة كاملة + التوقيت: الدوسري (97) =====
+PASS: الدوسري (reciter 97) رجّع ملف صوت: https://download.quranicaudio.com/quran/yasser_ad-dussary//112.mp3
+  duration: None
+  عدد توقيتات الآيات: 0
+  WARN: مفيش verse_timings، هنحتاج مصدر توقيت تاني
+  تحميل: status=200 type=audio/mpeg size=191104 first_bytes=2048
+
+===== 4d. صوت آية-آية للقراء المطابقين =====
+PASS: recitation 9 آية 112:1 -> https://audio.qurancdn.com/Minshawi/Murattal/mp3/112001.mp3
+  تحميل: status=200 type=audio/mpeg size=51537 first_bytes=2048
+PASS: recitation 8 آية 112:1 -> https://audio.qurancdn.com/Minshawi/Mujawwad/mp3/112001.mp3
+  تحميل: status=200 type=audio/mpeg size=108554 first_bytes=2048
+
+===== 5. رسم الآيات بالخط =====
+PASS 112:1: الخط فيه كل رموز الآية
+  اترسمت: probe_112_1.png (خط 120، 1 سطر)
+PASS 112:4: الخط فيه كل رموز الآية
+  اترسمت: probe_112_4.png (خط 120، 2 سطر)
+PASS 2:255: الخط فيه كل رموز الآية
+  اترسمت: probe_2_255.png (خط 64، 7 سطر)
+
+===== 6. JSON الخام للتوقيت =====
+-- reciter 9 params={'segments': 'true'}
+{"audio_file": {"id": 1361, "chapter_id": 112, "file_size": 313472.0, "format": "mp3", "audio_url": "https://download.quranicaudio.com/qdc/siddiq_minshawi/murattal/112.mp3", "timestamps": [{"verse_key": "112:1", "timestamp_from": 0, "timestamp_to": 3400, "duration": 3350, "segments": [[1, 0.0, 710.0], [2, 710.0, 980.0], [3, 980.0, 2090.0], [4, 2090.0, 2815.0]]}, {"verse_key": "112:2", "timestamp_from": 3400, "timestamp_to": 6060, "duration": 2620, "segments": [[1, 3400.0, 4760.0], [2, 4760.0, 5595.0]]}, {"verse_key": "112:3", "timestamp_from": 6060, "timestamp_to": 9530, "duration": 3430, "segments": [[1, 6060.0, 6760.0], [2, 6760.0, 7410.0], [3, 7410.0, 8260.0], [4, 8260.0, 9035.0]]}, {"verse_key": "112:4", "timestamp_from": 9530, "timestamp_to": 14410, "duration": 4840, "segments": [[1, 9530.0, 10470.0], [2, 10470.0, 11078.0], [3, 11078.0, 12030.0], [4, 12030.0, 13130.0], [5, 13130.0, 13765.0]]}]}}
+-- reciter 9 params={}
+{"audio_file": {"id": 1361, "chapter_id": 112, "file_size": 313472.0, "format": "mp3", "audio_url": "https://download.quranicaudio.com/qdc/siddiq_minshawi/murattal/112.mp3"}}
+-- reciter 97 params={'segments': 'true'}
+{"audio_file": {"id": 18483, "chapter_id": 112, "file_size": 191104.0, "format": "mp3", "audio_url": "https://download.quranicaudio.com/quran/yasser_ad-dussary//112.mp3", "timestamps": [{"verse_key": "112:1", "timestamp_from": 40, "timestamp_to": 2190, "duration": 2150, "segments": [[1, 0, 290], [2, 290, 640], [3, 720, 1300], [4, 1300, 2190]]}, {"verse_key": "112:2", "timestamp_from": 2490, "timestamp_to": 4250, "duration": 1760, "segments": [[1, 2690, 3290], [2, 3290, 4250]]}, {"verse_key": "112:3", "timestamp_from": 4370, "timestamp_to": 6940, "duration": 2570, "segments": [[1, 4570, 4890], [2, 4890, 5450], [3, 5450, 5950], [4, 5950, 6940]]}, {"verse_key": "112:4", "timestamp_from": 7120, "timestamp_to": 10490, "duration": 3370, "segments": [[1, 7120, 7630], [2, 7630, 8170], [3, 8170, 8800], [4, 8800, 9590], [5, 9590, 10490]]}]}}
+-- reciter 97 params={}
+{"audio_file": {"id": 18483, "chapter_id": 112, "file_size": 191104.0, "format": "mp3", "audio_url": "https://download.quranicaudio.com/quran/yasser_ad-dussary//112.mp3"}}
+-- quran/recitations/9: {"audio_files": [{"verse_key": "112:1", "url": "Minshawi/Murattal/mp3/112001.mp3"}, {"verse_key": "112:2", "url": "Minshawi/Murattal/mp3/112002.mp3"}, {"verse_key": "112:3", "url": "Minshawi/Murattal/mp3/112003.mp3"}, {"verse_key": "112:4", "url": "Minshawi/Murattal/mp3/112004.mp3"}], "meta": {"reciter_name": "Mohamed Siddiq al-Minshawi", "recitation_style": "Murattal", "filters": {"chapter_number": "112"}}}
+-- quran/recitations/97: {"audio_files": [], "meta": {"reciter_name": null, "recitation_style": null, "filters": {"chapter_number": "112"}}}
+
+===== 7. everyayah =====
+Minshawy_Murattal_128kbps: status=200 size=79540
+Minshawy_Mujawwad_192kbps: status=200 size=215050
+Yasser_Ad-Dussary_128kbps: status=200 size=55424
+-- تطابقات من everyayah recitations.js:
+  "subfolder":"Minshawy_Mujawwad_64kbps",
+  "name":"Minshawy Mujawwad",
+  "subfolder":"Minshawy_Mujawwad_192kbps",
+  "name":"Minshawy Mujawwad",
+  "subfolder":"Minshawy_Murattal_128kbps",
+  "name":"Minshawy Murattal",
+  "subfolder":"Yasser_Ad-Dussary_128kbps",
+  "name":"Yasser_Ad-Dussary",
+
+===== 8. تفاصيل الفروق الدقيقة =====
+اتكتب 277 فرق في probe_output/diffs.txt
+  1:1: [('insert', '', '\ufeff')]
+  2:4: [('insert', '', 'ء')]
+  2:8: [('insert', '', 'ء')]
+  2:34: [('insert', '', 'ء')]
+  2:62: [('insert', '', 'ء')]
+  2:86: [('insert', '', 'ء')]
+  2:94: [('insert', '', 'ء')]
+  2:102: [('insert', '', 'ء')]
+  2:114: [('insert', '', 'ء')]
+  2:118: [('insert', '', 'ء')]
+  2:126: [('insert', '', 'ء')]
+  2:130: [('insert', '', 'ء')]
+  2:164: [('insert', '', 'ء')]
+  2:177: [('insert', '', 'ء')]
+  2:181: [('delete', ' ', '')]
+  2:200: [('insert', '', 'ء')]
+  2:201: [('insert', '', 'ء')]
+  2:217: [('insert', '', 'ء')]
+  2:219: [('insert', '', 'ء')]
+  2:220: [('insert', '', 'ء')]
+  2:228: [('insert', '', 'ء')]
+  2:232: [('insert', '', 'ء')]
+  2:248: [('insert', '', 'ء')]
+  2:264: [('insert', '', 'ء')]
+  2:266: [('insert', '', 'ء')]
