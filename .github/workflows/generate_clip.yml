@@ -1,13 +1,13 @@
 name: Generate Quran Clip
 
 on:
-  workflow_dispatch: # تشغيل يدوي
+  workflow_dispatch:
 
 jobs:
   generate:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # لحفظ وتحديث قاعدة البيانات داخل المستودع
+      contents: write # للسماح برفع Releases وتحديث قاعدة البيانات
 
     steps:
       - name: Checkout Repository
@@ -26,7 +26,7 @@ jobs:
       - name: Install Python Packages
         run: |
           pip install --upgrade pip
-          pip install requests pillow fonttools
+          pip install requests pillow fonttools google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
       - name: Run Clip Generator
         env:
@@ -34,12 +34,21 @@ jobs:
         run: |
           python3 quran_clip_generator.py
 
-      - name: Upload Generated Video as Artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload Video to Google Drive
+        env:
+          GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        run: |
+          python3 drive_uploader.py
+
+      - name: Upload Direct MP4 to GitHub Releases
+        uses: softprops/action-gh-release@v2
         with:
-          name: quran-clips
-          path: generated_videos/*.mp4
-          retention-days: 7
+          tag_name: video-${{ github.run_number }}
+          name: Quran Clip #${{ github.run_number }}
+          files: generated_videos/*.mp4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Save DB State (Commit & Push)
         run: |
