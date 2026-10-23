@@ -9,6 +9,20 @@ on:
     - cron: '41 17 * * *'
     - cron: '13 19 * * *'
   workflow_dispatch:
+    inputs:
+      reciter:
+        description: 'القارئ (minshawi أو dussary)'
+        required: false
+        default: 'minshawi'
+        type: choice
+        options:
+          - minshawi
+          - dussary
+      surah:
+        description: 'رقم سورة ثابت (سيبه فاضي عشان يكمّل تلقائياً من آخر مقطع)'
+        required: false
+        default: ''
+        type: string
 
 # ما يشتغلش تشغيلين مع بعض (عشان ما يحصلش تعارض على quran_clips.db)
 concurrency:
@@ -18,7 +32,7 @@ concurrency:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: write # لرفع Releases وتحديث قاعدة البيانات
 
@@ -29,34 +43,49 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: Install System Dependencies (FFmpeg, RAQM, Fonts)
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg libraqm-dev libfribidi-dev fonts-hosny-amiri
+          sudo apt-get install -y ffmpeg libraqm0 libraqm-dev libfribidi0 libfribidi-dev libharfbuzz0b fonts-hosny-amiri
 
       - name: Install Python Packages
         run: |
           pip install --upgrade pip
-          pip install requests pillow fonttools
+          pip install requests pillow
 
-      - name: Verify RAQM and font
+      - name: Verify RAQM, FFmpeg and font
         run: |
           python3 -c "from PIL import features; assert features.check('raqm'), 'RAQM مش شغال'; print('RAQM OK')"
-          fc-list | grep -i "AmiriQuran" || (echo "خط AmiriQuran مش موجود" && exit 1)
+          ffmpeg -version | head -1
+          fc-list | grep -i "Amiri" || (echo "خط Amiri مش موجود" && exit 1)
 
       - name: Run Clip Generator & Publish
         env:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RECITER: ${{ inputs.reciter || 'minshawi' }}
+          SURAH: ${{ inputs.surah }}
+          START_SURAH: '2'
         run: |
           python3 quran_clip_generator.py
 
+      - name: Upload video on failure (للتشخيص)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-run-video
+          path: generated_videos/
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Save DB State (Commit & Push)
+        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
