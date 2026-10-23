@@ -117,23 +117,19 @@ def find_next_clip(conn, surah_num, timestamps, reciter_key):
 
     return None
 
-# --- 4. جلب فيديو طبيعي مع تركيز قوي على المشاهد الليلية والمسائية ---
+# --- 4. جلب فيديو طبيعي ملون وعالي الحيوية والتشبع ---
 def get_pixabay_video(min_duration):
     key = os.environ.get("PIXABAY_API_KEY", "").strip()
     if not key:
         print("[!] لم يتم العثور على PIXABAY_API_KEY في متغيرات البيئة.")
         return None
 
-    # باقة مشاهد ليلية هادئة وطبيعية خلابة تناسب التلاوات
+    # كلمات بحث تركز على الألوان المشبعة ومناظر الطبيعة الخلابة
     CATEGORIES = [
-        # تصنيفات ليلية ومسائية ساحرة
-        ["night sky stars timelapse", "milky way galaxy space", "night ocean calm water"],
-        ["moon clouds night sky", "aurora borealis northern lights", "starry night mountains"],
-        ["sunset dusk twilight horizon", "night sea waves calm", "evening sky stars slow"],
-        ["campfire night sparks nature", "night mist forest trees", "deep blue night clouds"],
-        # تصنيفات طبيعية نهارية هادئة ومتنوعة
-        ["calm ocean sea aerial", "waterfall slow motion rocks", "deep green forest misty"],
-        ["foggy mountain peaks valley", "soft rain drops nature leaf", "desert sand dunes twilight"]
+        ["sunset ocean 4k vibrant", "golden hour landscape colorful", "vibrant sunrise horizon"],
+        ["deep blue night sky milky way", "aurora borealis vibrant", "crystal clear river stream"],
+        ["autumn colorful forest drone", "dramatic clouds blue sky sun", "tropical turquoise sea aerial"],
+        ["lush green mountains valley", "vivid waterfall nature slow motion", "starry night galaxy cinematic"]
     ]
 
     chosen_category = random.choice(CATEGORIES)
@@ -159,7 +155,6 @@ def get_pixabay_video(min_duration):
             data = r.json()
             hits = data.get("hits", [])
 
-            # استبعاد المشاهد التي تظهر أشخاصاً أو وجوهاً
             valid_hits = [
                 h for h in hits 
                 if h.get("duration", 0) >= 8 and not any(tag in h.get("tags", "").lower() for tag in ["person", "woman", "man", "girl", "face"])
@@ -171,12 +166,13 @@ def get_pixabay_video(min_duration):
             chosen = random.choice(valid_hits)
             videos = chosen.get("videos", {})
 
+            # اختيار أعلى دقة متاحة
             target = videos.get("large") or videos.get("medium") or videos.get("small")
             if not target or not target.get("url"):
                 continue
 
             video_url = target["url"]
-            print(f"[*] تم اختيار مشهد ({query}) - الرابط قيد التحميل...")
+            print(f"[*] تم اختيار مشهد غني بالألوان ({query}) - جاري التحميل...")
 
             with requests.get(video_url, headers=dl_headers, stream=True, timeout=90) as stream_res:
                 stream_res.raise_for_status()
@@ -195,7 +191,7 @@ def get_pixabay_video(min_duration):
     print("[!] تعذر جلب مقطع مناسب من Pixabay، سيتم استخدام خلفية ليلية داكنة مخصصة.")
     return None
 
-# --- 5. تقسيم الكلمات (من 3 إلى 4 كلمات) وتصميم الشرائح ---
+# --- 5. تقسيم الكلمات (من 3 إلى 4 كلمات) وتصميم الشرائح بدقة عالية ---
 def chunk_text(words, min_w=3, max_w=4):
     chunks = []
     i = 0
@@ -217,11 +213,15 @@ def render_phrase_slide(phrase_text, surah_name_ar, reciter_title, out_path):
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    header_font = ImageFont.truetype(FONT_PATH, 50, layout_engine=ImageFont.Layout.RAQM)
+    # عنوان السورة الذهبي المشبع
+    header_font = ImageFont.truetype(FONT_PATH, 52, layout_engine=ImageFont.Layout.RAQM)
     header_text = f"سورة {surah_name_ar} | {reciter_title}"
-    d.text((W // 2, 160), header_text, font=header_font, fill=(235, 195, 80, 255), anchor="ma", direction="rtl", language="ar")
+    
+    # ظل ناعم للترويسة لزيادة التباين
+    d.text((W // 2 + 2, 162), header_text, font=header_font, fill=(0, 0, 0, 220), anchor="ma", direction="rtl", language="ar")
+    d.text((W // 2, 160), header_text, font=header_font, fill=(255, 215, 80, 255), anchor="ma", direction="rtl", language="ar")
 
-    font_size = 95
+    font_size = 98
     font = ImageFont.truetype(FONT_PATH, font_size, layout_engine=ImageFont.Layout.RAQM)
     
     while font.getlength(phrase_text, direction="rtl", language="ar") > (W - 200) and font_size > 50:
@@ -229,13 +229,17 @@ def render_phrase_slide(phrase_text, surah_name_ar, reciter_title, out_path):
         font = ImageFont.truetype(FONT_PATH, font_size, layout_engine=ImageFont.Layout.RAQM)
 
     y = H // 2 - 40
-    for dx, dy in [(-3, -3), (3, -3), (-3, 3), (3, 3), (0, 4)]:
-        d.text((W // 2 + dx, y + dy), phrase_text, font=font, fill=(0, 0, 0, 240), anchor="ma", direction="rtl", language="ar")
+    # تحديد وظلال عريضة لضمان بروز الكلمات بوضوح فائق حتى مع زيادة إضاءة الخلفية
+    for dx in range(-4, 5):
+        for dy in range(-4, 5):
+            if abs(dx) + abs(dy) >= 3:
+                d.text((W // 2 + dx, y + dy), phrase_text, font=font, fill=(0, 0, 0, 240), anchor="ma", direction="rtl", language="ar")
+                
     d.text((W // 2, y), phrase_text, font=font, fill=(255, 255, 255, 255), anchor="ma", direction="rtl", language="ar")
 
     img.save(out_path, "PNG")
 
-# --- 6. الإنتاج والمعالجة النهائية بـ FFmpeg ---
+# --- 6. الإنتاج والمعالجة اللونية السينمائية (Color Grading + 4K Look) ---
 def generate_video(surah_num=2, reciter_key="minshawi"):
     conn = init_db()
     reciter_info = RECITERS[reciter_key]
@@ -294,12 +298,24 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
 
     if bg_video and os.path.exists(bg_video):
         inputs.extend(["-stream_loop", "-1", "-an", "-i", bg_video])
-        # تأثير سينمائي ناعم وخفيف يبرز جمال المشهد الطبيعي مع حفظ وضوح الكلمات
-        base_filter = "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=1:1,drawbox=t=fill:c=black@0.40[bg];"
+        
+        # فلتر الألوان السينمائي والحدة الفائقة (4K Simulation):
+        # 1. قص وتكبير ملائم للأبعاد الرأسية
+        # 2. unsharp: رفع حدة وتفاصيل المقطع بدقة
+        # 3. eq: تشبع لوني غني (1.35) وتباين قوي (1.18) وإشراق طفيف (0.02)
+        # 4. vignette: تظليل ناعم للأطراف لتركيز العين على مركز التلاوة
+        # 5. drawbox: طبقة تعتيم خفيفة جداً (25%) للحفاظ على حيوية الطبيعة
+        color_grade = (
+            "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
+            "unsharp=5:5:1.2:5:5:0.0,"
+            "eq=saturation=1.35:contrast=1.18:brightness=0.02,"
+            "vignette=PI/4,"
+            "drawbox=t=fill:c=black@0.25"
+        )
+        base_filter = f"[0:v]{color_grade}[bg];"
         last_label = "[bg]"
     else:
-        # خلفية ليلية كحلية أنيقة كبديل في حال عدم الاتصال
-        inputs.extend(["-f", "lavfi", "-i", f"color=c=0x060c14:s=1080x1920:d={duration}"])
+        inputs.extend(["-f", "lavfi", "-i", f"color=c=0x08131d:s=1080x1920:d={duration}"])
         base_filter = ""
         last_label = "[0:v]"
 
@@ -326,6 +342,7 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
 
     out_file = os.path.join(OUT_DIR, f"Surah_{surah_num}_{start_ayah}-{end_ayah}_{reciter_key}.mp4")
 
+    # إعدادات ريندر فائقة النقاء (High Bitrate + Low CRF) تعطي مظهر الـ 4K النقي
     cmd = [
         "ffmpeg", "-y",
         *inputs,
@@ -334,19 +351,19 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
         "-map", last_label,
         "-map", f"{idx}:a",
         "-c:v", "libx264",
-        "-crf", "28",
-        "-preset", "veryfast",
-        "-b:v", "1500k",
-        "-maxrate", "2000k",
-        "-bufsize", "4000k",
+        "-crf", "20",           # جودة بصرية عالية بدون تشويش ضغط
+        "-preset", "faster",
+        "-b:v", "4000k",        # معدل بت مرتفع للتفاصيل الحادة
+        "-maxrate", "5500k",
+        "-bufsize", "8000k",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
-        "-b:a", "96k",
+        "-b:a", "128k",
         "-t", str(duration),
         out_file
     ]
 
-    print("[*] جاري المعالجة وتصدير الفيديو النهائي عبر FFmpeg...")
+    print("[*] جاري المعالجة وتصدير الفيديو النهائي بجودة الألوان المشبعة...")
     subprocess.run(cmd, check=True)
 
     actual_size = os.path.getsize(out_file)
@@ -445,12 +462,7 @@ def notify_make(video_url, video_title):
 if __name__ == "__main__":
     video_path, title = generate_video(surah_num=2, reciter_key="minshawi")
     if video_path and title:
-        # إرسال الفيديو والنص لتليجرام أولاً
         send_to_telegram(video_path, title)
-        
-        # رفع الفيديو والحصول على الرابط المباشر
         direct_link = upload_to_github_release(video_path)
-        
-        # إشعار Make.com للنشر التلقائي
         if direct_link:
             notify_make(direct_link, title)
