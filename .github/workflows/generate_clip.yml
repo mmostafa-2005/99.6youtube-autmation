@@ -2,10 +2,12 @@ name: Generate and Publish Quran Clip
 
 on:
   schedule:
-    # يعمل 4 مرات يومياً: 2 الظهر، 5 المغرب، 8 بالليل، 10 بالليل (توقيت مصر / السعودية)
-    - cron: '0 11,14,17,19 * * *'
-  workflow_dispatch: # يتيح التشغيل اليدوي في أي وقت
-
+    - cron: '0 11 * * *'
+    - cron: '0 14 * * *'
+    - cron: '0 17 * * *'
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+    
 jobs:
   generate:
     runs-on: ubuntu-latest
