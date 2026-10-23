@@ -2,17 +2,25 @@ name: Generate and Publish Quran Clip
 
 on:
   schedule:
-    - cron: '0 11 * * *'
-    - cron: '0 14 * * *'
-    - cron: '0 17 * * *'
-    - cron: '0 19 * * *'
+    # كل المواعيد بتوقيت UTC. الدقايق مش 0 عشان GitHub بيأخّر أو بيسقّط
+    # الـ jobs اللي بتبدأ على رأس الساعة وقت الضغط.
+    - cron: '7 11 * * *'
+    - cron: '23 14 * * *'
+    - cron: '41 17 * * *'
+    - cron: '13 19 * * *'
   workflow_dispatch:
-    
+
+# ما يشتغلش تشغيلين مع بعض (عشان ما يحصلش تعارض على quran_clips.db)
+concurrency:
+  group: quran-clip
+  cancel-in-progress: false
+
 jobs:
   generate:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
-      contents: write # للسماح برفع Releases وتحديث قاعدة البيانات
+      contents: write # لرفع Releases وتحديث قاعدة البيانات
 
     steps:
       - name: Checkout Repository
@@ -33,6 +41,11 @@ jobs:
           pip install --upgrade pip
           pip install requests pillow fonttools
 
+      - name: Verify RAQM and font
+        run: |
+          python3 -c "from PIL import features; assert features.check('raqm'), 'RAQM مش شغال'; print('RAQM OK')"
+          fc-list | grep -i "AmiriQuran" || (echo "خط AmiriQuran مش موجود" && exit 1)
+
       - name: Run Clip Generator & Publish
         env:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
@@ -45,8 +58,13 @@ jobs:
 
       - name: Save DB State (Commit & Push)
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add quran_clips.db
-          git diff-index --quiet HEAD || git commit -m "chore: update quran clips database [skip ci]"
-          git push
+          if git diff --cached --quiet; then
+            echo "مفيش تغيير في قاعدة البيانات"
+          else
+            git commit -m "chore: update quran clips database [skip ci]"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
