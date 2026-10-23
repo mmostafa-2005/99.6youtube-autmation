@@ -30,7 +30,7 @@ GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# البحث التلقائي عن مسار خط المصحف
+# مسار خط المصحف
 FONT_PATH = "/usr/share/fonts/opentype/fonts-hosny-amiri/AmiriQuran.ttf"
 if not os.path.exists(FONT_PATH):
     import glob
@@ -117,46 +117,85 @@ def find_next_clip(conn, surah_num, timestamps, reciter_key):
 
     return None
 
-# --- 4. جلب فيديو الخلفية من Pixabay ---
+# --- 4. جلب فيديو طبيعي مع تركيز قوي على المشاهد الليلية والمسائية ---
 def get_pixabay_video(min_duration):
     key = os.environ.get("PIXABAY_API_KEY", "").strip()
     if not key:
+        print("[!] لم يتم العثور على PIXABAY_API_KEY في متغيرات البيئة.")
         return None
 
-    queries = ["waterfall", "sea ocean", "clouds sky", "mountains", "forest trees"]
-    query = random.choice(queries)
-    url = "https://pixabay.com/api/videos/"
-    params = {"key": key, "q": query, "video_type": "film", "per_page": 50}
+    # باقة مشاهد ليلية هادئة وطبيعية خلابة تناسب التلاوات
+    CATEGORIES = [
+        # تصنيفات ليلية ومسائية ساحرة
+        ["night sky stars timelapse", "milky way galaxy space", "night ocean calm water"],
+        ["moon clouds night sky", "aurora borealis northern lights", "starry night mountains"],
+        ["sunset dusk twilight horizon", "night sea waves calm", "evening sky stars slow"],
+        ["campfire night sparks nature", "night mist forest trees", "deep blue night clouds"],
+        # تصنيفات طبيعية نهارية هادئة ومتنوعة
+        ["calm ocean sea aerial", "waterfall slow motion rocks", "deep green forest misty"],
+        ["foggy mountain peaks valley", "soft rain drops nature leaf", "desert sand dunes twilight"]
+    ]
 
-    try:
-        r = requests.get(url, params=params, headers=HEADERS, timeout=30)
-        hits = r.json().get("hits", [])
-        valid_hits = [h for h in hits if h.get("duration", 0) >= 10]
-        if not valid_hits:
-            return None
+    chosen_category = random.choice(CATEGORIES)
+    search_queries = random.sample(chosen_category, len(chosen_category))
 
-        chosen = random.choice(valid_hits)
-        videos = chosen.get("videos", {})
-        target = videos.get("large") or videos.get("medium") or videos.get("small")
-        if not target or not target.get("url"):
-            return None
+    bg_path = os.path.join(TEMP_DIR, "pixabay_bg.mp4")
+    dl_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+    }
 
-        video_url = target["url"]
-        bg_path = os.path.join(TEMP_DIR, "pixabay_bg.mp4")
-        dl_headers = {"User-Agent": "Mozilla/5.0"}
-        with requests.get(video_url, headers=dl_headers, stream=True, timeout=90) as stream_res:
-            stream_res.raise_for_status()
-            with open(bg_path, "wb") as f:
-                for chunk in stream_res.iter_content(chunk_size=1024 * 512):
-                    f.write(chunk)
+    for query in search_queries:
+        url = "https://pixabay.com/api/videos/"
+        params = {
+            "key": key,
+            "q": query,
+            "video_type": "film",
+            "per_page": 40,
+            "safesearch": "true"
+        }
 
-        if os.path.exists(bg_path) and os.path.getsize(bg_path) > 100000:
-            return bg_path
-    except Exception as e:
-        print(f"[!] خطأ Pixabay: {e}")
+        try:
+            r = requests.get(url, params=params, headers=HEADERS, timeout=30)
+            data = r.json()
+            hits = data.get("hits", [])
+
+            # استبعاد المشاهد التي تظهر أشخاصاً أو وجوهاً
+            valid_hits = [
+                h for h in hits 
+                if h.get("duration", 0) >= 8 and not any(tag in h.get("tags", "").lower() for tag in ["person", "woman", "man", "girl", "face"])
+            ]
+
+            if not valid_hits:
+                continue
+
+            chosen = random.choice(valid_hits)
+            videos = chosen.get("videos", {})
+
+            target = videos.get("large") or videos.get("medium") or videos.get("small")
+            if not target or not target.get("url"):
+                continue
+
+            video_url = target["url"]
+            print(f"[*] تم اختيار مشهد ({query}) - الرابط قيد التحميل...")
+
+            with requests.get(video_url, headers=dl_headers, stream=True, timeout=90) as stream_res:
+                stream_res.raise_for_status()
+                with open(bg_path, "wb") as f:
+                    for chunk in stream_res.iter_content(chunk_size=1024 * 512):
+                        f.write(chunk)
+
+            if os.path.exists(bg_path) and os.path.getsize(bg_path) > 100000:
+                print(f"[✓] تم تحميل فيديو الخلفية بنجاح! الحجم: {os.path.getsize(bg_path) / (1024*1024):.2f} ميجابايت")
+                return bg_path
+
+        except Exception as e:
+            print(f"[!] خطأ أثناء سحب الفيديو للكلمة ({query}): {e}")
+            continue
+
+    print("[!] تعذر جلب مقطع مناسب من Pixabay، سيتم استخدام خلفية ليلية داكنة مخصصة.")
     return None
 
-# --- 5. تقسيم النصوص ورسم الشرائح بحجم 3 إلى 4 كلمات ---
+# --- 5. تقسيم الكلمات (من 3 إلى 4 كلمات) وتصميم الشرائح ---
 def chunk_text(words, min_w=3, max_w=4):
     chunks = []
     i = 0
@@ -196,7 +235,7 @@ def render_phrase_slide(phrase_text, surah_name_ar, reciter_title, out_path):
 
     img.save(out_path, "PNG")
 
-# --- 6. الإنتاج النهائي عبر FFmpeg ---
+# --- 6. الإنتاج والمعالجة النهائية بـ FFmpeg ---
 def generate_video(surah_num=2, reciter_key="minshawi"):
     conn = init_db()
     reciter_info = RECITERS[reciter_key]
@@ -255,10 +294,12 @@ def generate_video(surah_num=2, reciter_key="minshawi"):
 
     if bg_video and os.path.exists(bg_video):
         inputs.extend(["-stream_loop", "-1", "-an", "-i", bg_video])
-        base_filter = "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,drawbox=t=fill:c=black@0.45[bg];"
+        # تأثير سينمائي ناعم وخفيف يبرز جمال المشهد الطبيعي مع حفظ وضوح الكلمات
+        base_filter = "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=1:1,drawbox=t=fill:c=black@0.40[bg];"
         last_label = "[bg]"
     else:
-        inputs.extend(["-f", "lavfi", "-i", f"color=c=0x08131d:s=1080x1920:d={duration}"])
+        # خلفية ليلية كحلية أنيقة كبديل في حال عدم الاتصال
+        inputs.extend(["-f", "lavfi", "-i", f"color=c=0x060c14:s=1080x1920:d={duration}"])
         base_filter = ""
         last_label = "[0:v]"
 
@@ -404,10 +445,12 @@ def notify_make(video_url, video_title):
 if __name__ == "__main__":
     video_path, title = generate_video(surah_num=2, reciter_key="minshawi")
     if video_path and title:
-        # إرسال الفيديو لتليجرام أولاً
+        # إرسال الفيديو والنص لتليجرام أولاً
         send_to_telegram(video_path, title)
         
-        # رفع الفيديو وإشعار Make.com
+        # رفع الفيديو والحصول على الرابط المباشر
         direct_link = upload_to_github_release(video_path)
+        
+        # إشعار Make.com للنشر التلقائي
         if direct_link:
             notify_make(direct_link, title)
