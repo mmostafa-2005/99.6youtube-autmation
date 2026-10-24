@@ -87,6 +87,8 @@ jobs:
           RECITER: ${{ inputs.reciter || vars.DEFAULT_RECITER || 'minshawi' }}
           SURAH: ${{ inputs.surah }}
           START_SURAH: '2'
+          # shared = يكمل بعد آخر مقطع في الداتا بيز (أي قارئ) | per_reciter = تقدم مستقل لكل قارئ
+          PROGRESS_MODE: ${{ vars.PROGRESS_MODE || 'shared' }}
           CHECK_RECITERS: ${{ inputs.check_reciters && '1' || '0' }}
         run: |
           python3 quran_clip_generator.py
