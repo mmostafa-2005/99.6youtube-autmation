@@ -12,6 +12,10 @@ Quran short-video generator (نسخة محسّنة + قراء إضافيين)
     SURAH           رقم سورة ثابت (لو مش محدد بيكمل تلقائياً من آخر مقطع ويتنقل للسورة التالية)
     START_SURAH     أول سورة تبدأ بها لو قاعدة البيانات فاضية (الافتراضي: 2)
     FONT_PATH       مسار خط بديل
+    PROGRESS_MODE   shared (الافتراضي) | per_reciter
+                    shared      : الموضع واحد لكل القراء. لو ما حددتش SURAH، بيكمل بعد آخر مقطع
+                                  اتسجل في الداتا بيز (أي قارئ)، والقارئ بيغيّر الصوت بس.
+                    per_reciter : لكل قارئ تقدمه المستقل (كل قارئ بيبدأ من START_SURAH).
     CHECK_RECITERS  لو = 1: يفحص كل القراء المعرّفين ويطبع النتيجة فقط (من غير إنتاج فيديو
                     ومن غير ما يلمس قاعدة البيانات)
 
@@ -84,6 +88,8 @@ ARABIC_DIGITS = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
 W, H = 1080, 1920
 FPS = 30
 MIN_CLIP_SEC, MAX_CLIP_SEC = 25.0, 65.0
+
+PROGRESS_MODE = os.environ.get("PROGRESS_MODE", "shared").strip().lower()
 
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024      # حد عام
 TELEGRAM_LIMIT_BYTES = 48 * 1024 * 1024      # حد Bot API هو 50MB
@@ -182,8 +188,12 @@ def mark_clip_done(conn, surah, start_ayah, end_ayah, reciter, duration):
 
 
 def resume_surah(conn, reciter_key, default):
-    row = conn.execute("SELECT surah FROM completed_clips WHERE reciter=? ORDER BY rowid DESC LIMIT 1",
-                       (reciter_key,)).fetchone()
+    """السورة اللي وقفنا عندها: آخر مقطع اتسجل (أي قارئ لو shared، أو القارئ ده لو per_reciter)."""
+    if PROGRESS_MODE == "per_reciter":
+        row = conn.execute("SELECT surah FROM completed_clips WHERE reciter=? ORDER BY rowid DESC LIMIT 1",
+                           (reciter_key,)).fetchone()
+    else:
+        row = conn.execute("SELECT surah FROM completed_clips ORDER BY rowid DESC LIMIT 1").fetchone()
     return row[0] if row else default
 
 
@@ -217,6 +227,7 @@ def resolve_chapter_audio(reciter_key, surah_num):
         url = data.get("audio_url", "")
         if url_matches(url, cfg):
             _RESOLVED[reciter_key] = rid
+            print(f"[*] {reciter_key}: id={rid} | {url}")
             return rid, data
         seen.append(f"id={rid}: {url}")
     raise RuntimeError(
@@ -237,16 +248,26 @@ def parse_timestamps(data):
     return timestamps
 
 
+def _ts_context(timestamps, ayah, span=2):
+    rows = []
+    for a in range(max(1, ayah - span), ayah + span + 1):
+        if a in timestamps:
+            t = timestamps[a]
+            rows.append(f"آية {a}: من {t['from']:.2f} إلى {t['to']:.2f}")
+    return " | ".join(rows)
+
+
 def validate_timestamps(timestamps, tolerance=0.3):
     """بعض القراء توقيتاتهم غير سليمة (مدة سالبة/تداخل). نرفضها بدل ما نقص صوت غلط."""
     prev_end = 0.0
     for ayah in sorted(timestamps):
         t = timestamps[ayah]
         if t["to"] <= t["from"]:
-            raise RuntimeError(f"توقيت غير منطقي للآية {ayah}: {t['from']:.2f}-{t['to']:.2f}")
+            raise RuntimeError(f"توقيت غير منطقي للآية {ayah}. حواليها: {_ts_context(timestamps, ayah)}")
         if t["from"] < prev_end - tolerance:
-            raise RuntimeError(f"توقيت الآية {ayah} بيتداخل مع اللي قبلها "
-                               f"({t['from']:.2f} < {prev_end:.2f})")
+            raise RuntimeError(f"توقيت الآية {ayah} بيتداخل مع الآية اللي قبلها "
+                               f"(بداية {t['from']:.2f} ث قبل نهاية السابقة {prev_end:.2f} ث). "
+                               f"حواليها: {_ts_context(timestamps, ayah)}")
         prev_end = t["to"]
 
 
@@ -265,7 +286,6 @@ def fetch_surah_data(surah_num, reciter_key):
     missing = [a for a in verses_text if a not in timestamps]
     if not timestamps or missing:
         raise RuntimeError(f"توقيتات الآيات ناقصة لهذا القارئ/السورة (ناقص: {missing[:5]}...)")
-    validate_timestamps(timestamps)
 
     return surah_name_ar, verses_text, timestamps, data["audio_url"], rid
 
@@ -291,8 +311,12 @@ def check_reciters():
 # ----------------------------------------------------------------------------
 def find_next_clip(conn, surah_num, timestamps, reciter_key):
     total = len(timestamps)
-    row = conn.execute("SELECT MAX(end_ayah) FROM completed_clips WHERE surah=? AND reciter=?",
-                       (surah_num, reciter_key)).fetchone()
+    if PROGRESS_MODE == "per_reciter":
+        row = conn.execute("SELECT MAX(end_ayah) FROM completed_clips WHERE surah=? AND reciter=?",
+                           (surah_num, reciter_key)).fetchone()
+    else:
+        row = conn.execute("SELECT MAX(end_ayah) FROM completed_clips WHERE surah=?",
+                           (surah_num,)).fetchone()
     last_ended = row[0] if row and row[0] is not None else 0
     if last_ended >= total:
         return None
@@ -671,6 +695,8 @@ def generate_video(conn, surah_num, reciter_key, bg_video=None):
     if not clip:
         return None
     start_ayah, end_ayah, est = clip
+    # بنتحقق من توقيت الآيات المستخدمة في المقطع ده بس (غلط في آية بعيدة ما يوقفش المقطع)
+    validate_timestamps({a: timestamps[a] for a in range(start_ayah, end_ayah + 1)})
     print(f"[+] سورة {surah_name}: الآيات {start_ayah}-{end_ayah} (≈{est:.1f} ث)")
 
     if bg_video is None:
@@ -773,17 +799,21 @@ def main():
         return check_reciters()
 
     check_environment()
+    if PROGRESS_MODE not in ("shared", "per_reciter"):
+        raise SystemExit(f"PROGRESS_MODE غير معروف: {PROGRESS_MODE} (المتاح: shared / per_reciter)")
     reciter_key = os.environ.get("RECITER", "minshawi")
     if reciter_key not in RECITERS:
         raise SystemExit(f"RECITER غير معروف: {reciter_key}. المتاح: {', '.join(RECITERS)}")
 
     conn = init_db()
-    fixed = os.environ.get("SURAH")
+    fixed = (os.environ.get("SURAH") or "").strip()
     if fixed:
         surahs = [int(fixed)]
+        print(f"[i] سورة ثابتة: {fixed}")
     else:
         first = resume_surah(conn, reciter_key, int(os.environ.get("START_SURAH", "2")))
         surahs = list(range(first, 115))
+        print(f"[i] وضع التقدم: {PROGRESS_MODE} | هنكمل من سورة {first}")
 
     clip = None
     for s in surahs:
