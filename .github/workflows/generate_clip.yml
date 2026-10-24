@@ -2,8 +2,9 @@ name: Generate and Publish Quran Clip
 
 on:
   schedule:
-    # كل المواعيد بتوقيت UTC. الدقايق مش 0 عشان GitHub بيأخّر أو بيسقّط
-    # الـ jobs اللي بتبدأ على رأس الساعة وقت الضغط.
+    # كل المواعيد بتوقيت UTC (= توقيتك GMT+3 ناقص 3 ساعات):
+    # 11:07 UTC = 2:07 م | 14:23 UTC = 5:23 م | 17:41 UTC = 8:41 م | 19:13 UTC = 10:13 م
+    # GitHub بيأخّر الـ schedule أحياناً بالساعات، ده خارج عن إيدينا.
     - cron: '7 11 * * *'
     - cron: '23 14 * * *'
     - cron: '41 17 * * *'
@@ -11,18 +12,31 @@ on:
   workflow_dispatch:
     inputs:
       reciter:
-        description: 'القارئ (minshawi أو dussary)'
+        description: 'القارئ'
         required: false
         default: 'minshawi'
         type: choice
         options:
           - minshawi
           - dussary
+          - abdulbasit
+          - abdulbasit_mujawwad
+          - alafasy
+          - sudais
+          - husary
+          - shatri
+          - rifai
+          - shuraym
       surah:
         description: 'رقم سورة ثابت (سيبه فاضي عشان يكمّل تلقائياً من آخر مقطع)'
         required: false
         default: ''
         type: string
+      check_reciters:
+        description: 'فحص القراء فقط (من غير إنتاج أو نشر فيديو)'
+        required: false
+        default: false
+        type: boolean
 
 # ما يشتغلش تشغيلين مع بعض (عشان ما يحصلش تعارض على quran_clips.db)
 concurrency:
@@ -69,9 +83,11 @@ jobs:
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          RECITER: ${{ inputs.reciter || 'minshawi' }}
+          # يدوي: اللي تختاره. مجدول: المتغير DEFAULT_RECITER (Settings → Variables) أو minshawi
+          RECITER: ${{ inputs.reciter || vars.DEFAULT_RECITER || 'minshawi' }}
           SURAH: ${{ inputs.surah }}
           START_SURAH: '2'
+          CHECK_RECITERS: ${{ inputs.check_reciters && '1' || '0' }}
         run: |
           python3 quran_clip_generator.py
 
