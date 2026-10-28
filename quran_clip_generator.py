@@ -17,6 +17,8 @@ Quran short-video generator (v2.2: ظهور كلمة بكلمة + شكل مشغ�
     BG_MODE         black (الافتراضي: خلفية سوداء زي المشغّل) | video (فيديو طبيعة من Pixabay)
     LINES_PER_CARD  عدد الأسطر في الكارت: 1 أو 2 (الافتراضي 2) - كل سطر 4 كلمات بالكتير
     HIGHLIGHT       لو = 1: الكلمة اللي بتتقال دلوقتي تظهر بلون ذهبي (الافتراضي 0)
+    FADE_FRAMES     مدة fade-in لكل كلمة بالفريمات (الافتراضي 6 ≈ 0.2 ثانية، 1 = من غير fade)
+    LOGO_PATH       مسار اللوجو (الافتراضي: logo.png / logo.jpg / logo.jpeg جنب السكريبت)
 """
 import glob
 import math
@@ -81,6 +83,8 @@ PROGRESS_MODE = os.environ.get("PROGRESS_MODE", "shared").strip().lower()
 BG_MODE = os.environ.get("BG_MODE", "black").strip().lower()
 LINES_PER_CARD = min(2, max(1, int(os.environ.get("LINES_PER_CARD", "2") or 2)))
 HIGHLIGHT = os.environ.get("HIGHLIGHT", "0").strip() == "1"
+FADE_FRAMES = max(1, int(os.environ.get("FADE_FRAMES", "6") or 6))   # مدة الـ fade-in بالفريمات (6 ≈ 0.2 ث)
+LOGO_PATH = os.environ.get("LOGO_PATH", "").strip()
 
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 TELEGRAM_LIMIT_BYTES = 48 * 1024 * 1024
@@ -556,6 +560,33 @@ def circle_button(d, cx, cy, r=80):
     d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=BTN_FILL, outline=BTN_LINE, width=2)
 
 
+def load_logo(diameter):
+    """يحمّل اللوجو، يقصّه حوالين المحتوى، ويرجّعه دايرة بقطر diameter (أو None لو مش موجود)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    cands = [LOGO_PATH] if LOGO_PATH else []
+    for n in ("logo.png", "logo.jpg", "logo.jpeg"):
+        cands += [os.path.join(here, n), n]
+    cands += sorted(glob.glob(os.path.join(here, "logo.*")) + glob.glob("logo.*"))   # أي امتداد/كتابة تانية (مثلاً logo.jepg)
+    path = next((c for c in cands if c and os.path.exists(c)), None)
+    if not path:
+        print("[!] اللوجو مش موجود (logo.png)، هيتم استخدام الأسطوانة.")
+        return None
+    try:
+        im = Image.open(path).convert("RGB")
+        box = im.convert("L").point(lambda p: 255 if p > 60 else 0).getbbox() or (0, 0, im.width, im.height)
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        side = max(box[2] - box[0], box[3] - box[1]) * 1.5
+        im = im.crop((int(cx - side / 2), int(cy - side / 2), int(cx + side / 2), int(cy + side / 2)))
+        im = im.resize((diameter, diameter), Image.LANCZOS).convert("RGBA")
+        mask = Image.new("L", (diameter * 4, diameter * 4), 0)
+        ImageDraw.Draw(mask).ellipse((0, 0, diameter * 4 - 1, diameter * 4 - 1), fill=255)
+        im.putalpha(mask.resize((diameter, diameter), Image.LANCZOS))
+        return im
+    except Exception as e:
+        print(f"[!] تعذر تحميل اللوجو: {e}")
+        return None
+
+
 def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, source_text,
                   full_dur, t_start):
     """يبني الطبقة الثابتة مرة واحدة ويرجّع دالة render(state, sec) -> bytes (RGBA خام)."""
@@ -586,8 +617,14 @@ def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, so
     vx, vy = W - 150, OY + 205
     d.ellipse((vx - 95, vy - 95, vx + 95, vy + 95), fill=(10, 10, 10, 255), outline=(95, 95, 95, 255), width=6)
     d.ellipse((vx - 82, vy - 82, vx + 82, vy + 82), outline=(45, 45, 45, 255), width=2)
-    d.ellipse((vx - 66, vy - 66, vx + 66, vy + 66), outline=WHITE, width=9)
-    d.ellipse((vx - 13, vy - 13, vx + 13, vy + 13), fill=(150, 150, 150, 255))
+    logo = load_logo(2 * 86)
+    if logo is not None:
+        base.alpha_composite(logo, (vx - 86, vy - 86))
+        d = ImageDraw.Draw(base)
+        d.ellipse((vx - 88, vy - 88, vx + 88, vy + 88), outline=(235, 235, 235, 255), width=3)
+    else:
+        d.ellipse((vx - 66, vy - 66, vx + 66, vy + 66), outline=WHITE, width=9)
+        d.ellipse((vx - 13, vy - 13, vx + 13, vy + 13), fill=(150, 150, 150, 255))
 
     # النصوص العلوية (السورة + نطاق الآيات / القارئ)
     xr = W - 290
@@ -653,7 +690,7 @@ def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, so
             yc = cy + (li - (n - 1) / 2) * line_h
             pos = []
             for w in widths:
-                pos.append((x, yc + size * 0.28))
+                pos.append((x, yc + size * 0.28, w))
                 x -= w + sp
             lay.append(pos)
         layouts.append([xy for line in lay for xy in line])
@@ -665,10 +702,20 @@ def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, so
     def render(state, sec):
         img = base.copy()
         dr = ImageDraw.Draw(img)
-        pi, k = state
-        for i, (u, (x, y)) in enumerate(list(zip(flats[pi], layouts[pi]))[:k]):
+        pi, k, lvl = state
+        for i, (u, (x, y, w)) in enumerate(list(zip(flats[pi], layouts[pi]))[:k]):
             color = GOLD if (HIGHLIGHT and i == k - 1) else WHITE
-            dr.text((x, y), u, font=qfont, fill=color, anchor="rs", direction="rtl", language="ar")
+            if i == k - 1 and lvl < FADE_FRAMES:          # آخر كلمة: fade-in
+                x0, y0 = int(x - w - 30), int(y - size * 1.0)
+                x1, y1 = int(x + 30), int(y + size * 0.6)
+                layer = Image.new("RGBA", (x1 - x0, y1 - y0), color[:3] + (0,))
+                ImageDraw.Draw(layer).text((x - x0, y - y0), u, font=qfont,
+                                           fill=color[:3] + (int(255 * lvl / FADE_FRAMES),),
+                                           anchor="rs", direction="rtl", language="ar")
+                img.alpha_composite(layer, (x0, y0))
+                dr = ImageDraw.Draw(img)
+            else:
+                dr.text((x, y), u, font=qfont, fill=color, anchor="rs", direction="rtl", language="ar")
         frac = min(1.0, sec / total_s) if total_s > 0 else 0.0
         fw = int((BX1 - BX0) * frac)
         if fw > 0:
@@ -690,16 +737,18 @@ def build_timeline(pages, duration, t_start):
             events.append((min(max(t, 0.0), duration), pi, k))
     events.sort(key=lambda e: e[0])
     states = [(0.0, (0, 0))] + [(t, (pi, k)) for t, pi, k in events]
+    fade_pts = {t + i / FPS for t, _, _ in events for i in range(1, FADE_FRAMES)}
 
     ticks = [s - t_start for s in range(int(t_start) + 1, int(t_start + duration) + 1)]
-    bounds = sorted({0.0, duration} | {t for t, _ in states} | {x for x in ticks if 0 < x < duration})
-    segs, j, cur = [], 0, states[0][1]
+    bounds = sorted({0.0, duration} | {t for t, _ in states} | {x for x in ticks if 0 < x < duration} | {x for x in fade_pts if 0 < x < duration})
+    segs, j, cur, cur_t = [], 0, states[0][1], 0.0
     for a, b in zip(bounds, bounds[1:]):
         while j < len(states) and states[j][0] <= a + 1e-6:
-            cur = states[j][1]
+            cur_t, cur = states[j]
             j += 1
         if b - a > 1e-6:
-            segs.append((a, b, cur, int(t_start + a + 1e-6)))
+            lvl = FADE_FRAMES if cur[1] == 0 else min(FADE_FRAMES, int((a - cur_t) * FPS + 1e-6) + 1)
+            segs.append((a, b, (cur[0], cur[1], lvl), int(t_start + a + 1e-6)))
     return segs
 
 
