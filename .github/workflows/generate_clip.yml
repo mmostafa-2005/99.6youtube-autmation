@@ -92,6 +92,9 @@ jobs:
           # shared = يكمل بعد آخر مقطع في الداتا بيز (أي قارئ) | per_reciter = تقدم مستقل لكل قارئ
           PROGRESS_MODE: ${{ vars.PROGRESS_MODE || 'shared' }}
           CHECK_RECITERS: ${{ inputs.check_reciters && '1' || '0' }}
+          BG_MODE: ${{ vars.BG_MODE || 'black' }}
+          LINES_PER_CARD: ${{ vars.LINES_PER_CARD || '2' }}
+          HIGHLIGHT: ${{ vars.HIGHLIGHT || '0' }}
         run: |
           python3 quran_clip_generator.py
 
