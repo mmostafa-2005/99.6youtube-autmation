@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Quran short-video generator (نسخة محسّنة + قراء إضافيين)
+Quran short-video generator (v2.2: ظهور كلمة بكلمة + شكل مشغّل صوت)
 
 المتطلبات على GitHub Actions:
     sudo apt-get install -y ffmpeg fonts-hosny-amiri libraqm0 libfribidi0 libharfbuzz0b
@@ -13,15 +13,10 @@ Quran short-video generator (نسخة محسّنة + قراء إضافيين)
     START_SURAH     أول سورة تبدأ بها لو قاعدة البيانات فاضية (الافتراضي: 2)
     FONT_PATH       مسار خط بديل
     PROGRESS_MODE   shared (الافتراضي) | per_reciter
-                    shared      : الموضع واحد لكل القراء. لو ما حددتش SURAH، بيكمل بعد آخر مقطع
-                                  اتسجل في الداتا بيز (أي قارئ)، والقارئ بيغيّر الصوت بس.
-                    per_reciter : لكل قارئ تقدمه المستقل (كل قارئ بيبدأ من START_SURAH).
-    CHECK_RECITERS  لو = 1: يفحص كل القراء المعرّفين ويطبع النتيجة فقط (من غير إنتاج فيديو
-                    ومن غير ما يلمس قاعدة البيانات)
-
-ملاحظة عن القراء: كل قارئ له "expect" = كلمات لازم تظهر في رابط الصوت اللي رجّعه الـ API.
-لو الـ ID طلع لقارئ تاني أو أسلوب تاني (مرتل/مجوّد) السكريبت يرفض ويوقف بدل ما ينشر
-مقطع باسم قارئ غلط.
+    CHECK_RECITERS  لو = 1: يفحص كل القراء المعرّفين ويطبع النتيجة فقط
+    BG_MODE         black (الافتراضي: خلفية سوداء زي المشغّل) | video (فيديو طبيعة من Pixabay)
+    LINES_PER_CARD  عدد الأسطر في الكارت: 1 أو 2 (الافتراضي 2) - كل سطر 4 كلمات بالكتير
+    HIGHLIGHT       لو = 1: الكلمة اللي بتتقال دلوقتي تظهر بلون ذهبي (الافتراضي 0)
 """
 import glob
 import math
@@ -34,27 +29,19 @@ import sys
 import traceback
 
 import requests
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, features
+from PIL import Image, ImageDraw, ImageFont, features
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ----------------------------------------------------------------------------
 # الإعدادات
 # ----------------------------------------------------------------------------
-# ids    : الـ IDs المحتملة للقارئ في Quran.com (chapter reciters). بنجرّبهم بالترتيب
-#          ونقبل أول واحد رابط صوته يطابق "expect".
-# expect : قايمة مجموعات؛ لازم من كل مجموعة كلمة على الأقل تظهر في رابط الصوت
-#          (المقارنة بدون حروف خاصة: "yasser_ad-dussary" => "yasseraddussary").
-# reject : (اختياري) كلمات لو ظهرت في الرابط نرفض الـ ID ده.
-# الترتيب الظاهر ده بس للعرض؛ الاختيار الفعلي بيتم بمتغير RECITER.
 _ABDULBASIT = ("abdulbaset", "abdulbasit", "abdulbasid", "abdulsamad")
 RECITERS = {
-    # --- متأكد منهم من الفحص اللي اتعمل ---
     "minshawi": {"ids": [9], "name": "محمد صديق المنشاوي",
                  "expect": [("minshawi", "menshawi", "minshawy"), ("murattal",)]},
     "dussary": {"ids": [97], "name": "ياسر الدوسري",
                 "expect": [("dussary", "dosari", "dosary", "dossari")]},
-    # --- جداد: بيتحققوا وقت التشغيل (شغّل CHECK_RECITERS=1 الأول) ---
     "abdulbasit": {"ids": list(range(1, 25)), "name": "عبد الباسط عبد الصمد",
                    "expect": [_ABDULBASIT, ("murattal",)]},
     "abdulbasit_mujawwad": {"ids": list(range(1, 25)), "name": "عبد الباسط عبد الصمد (مجوّد)",
@@ -82,17 +69,21 @@ os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 QCOM = "https://api.quran.com/api/v4"
-HEADERS = {"User-Agent": "quran-video-generator/2.1"}
+HEADERS = {"User-Agent": "quran-video-generator/2.2"}
 ARABIC_DIGITS = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
 
 W, H = 1080, 1920
 FPS = 30
 MIN_CLIP_SEC, MAX_CLIP_SEC = 25.0, 65.0
+MAX_WORDS_PER_LINE = 4
 
 PROGRESS_MODE = os.environ.get("PROGRESS_MODE", "shared").strip().lower()
+BG_MODE = os.environ.get("BG_MODE", "black").strip().lower()
+LINES_PER_CARD = min(2, max(1, int(os.environ.get("LINES_PER_CARD", "2") or 2)))
+HIGHLIGHT = os.environ.get("HIGHLIGHT", "0").strip() == "1"
 
-MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024      # حد عام
-TELEGRAM_LIMIT_BYTES = 48 * 1024 * 1024      # حد Bot API هو 50MB
+MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
+TELEGRAM_LIMIT_BYTES = 48 * 1024 * 1024
 
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
@@ -100,10 +91,19 @@ GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# علامات الوقف والرموز القرآنية التي تأتي أحياناً ككلمة منفصلة
 STOP_MARKS = "\u06d6\u06d7\u06d8\u06d9\u06da\u06db\u06dc"
 STANDALONE_MARKS = set(STOP_MARKS) | {"\u06de", "\u06e9"}
-PHRASE_BREAK_MARKS = set("\u06d7\u06d8\u06da\u06db")  # قلى، م، ج، ∴ → أماكن مناسبة لبدء شريحة جديدة
+PHRASE_BREAK_MARKS = set("\u06d7\u06d8\u06da\u06db")
+
+# ألوان واجهة المشغّل
+WHITE = (255, 255, 255, 255)
+GOLD = (255, 215, 90, 255)
+GREY = (150, 150, 150, 255)
+RING = (85, 85, 85, 255)
+BTN_FILL = (22, 22, 22, 255)
+BTN_LINE = (55, 55, 55, 255)
+BAR_TRACK = (38, 38, 38, 255)
+BAR_FILL = (232, 228, 218, 255)
 
 
 def make_session():
@@ -133,6 +133,15 @@ def find_font():
         if c and os.path.exists(c):
             return c
     raise RuntimeError("لم يتم العثور على خط المصحف. ثبّت: sudo apt-get install -y fonts-hosny-amiri")
+
+
+def find_ui_font():
+    """خط واجهة المشغّل (Amiri Bold لو موجود، وإلا خط المصحف)."""
+    for name in ("Amiri-Bold.ttf", "Amiri-Regular.ttf"):
+        hits = glob.glob(f"/usr/share/fonts/**/{name}", recursive=True)
+        if hits:
+            return hits[0]
+    return find_font()
 
 
 def check_environment():
@@ -198,14 +207,13 @@ def resume_surah(conn, reciter_key, default):
 
 
 # ----------------------------------------------------------------------------
-# 2. جلب النصوص والتوقيتات
+# 2. جلب النصوص والتوقيتات (بدون تغيير)
 # ----------------------------------------------------------------------------
 def _norm(s):
     return "".join(ch for ch in str(s).lower() if ch.isalnum())
 
 
 def url_matches(url, cfg):
-    """يتأكد إن رابط الصوت فعلاً للقارئ/الأسلوب المطلوب."""
     u = _norm(url)
     if any(_norm(x) in u for x in cfg.get("reject", ())):
         return False
@@ -213,14 +221,13 @@ def url_matches(url, cfg):
 
 
 def resolve_chapter_audio(reciter_key, surah_num):
-    """يرجّع (id, audio_file) للقارئ المطلوب بعد التأكد إن الرابط يطابق expect."""
     cfg = RECITERS[reciter_key]
     candidates = [_RESOLVED[reciter_key]] if reciter_key in _RESOLVED else cfg["ids"]
     seen = []
     for rid in candidates:
         r = HTTP.get(f"{QCOM}/chapter_recitations/{rid}/{surah_num}",
                      params={"segments": "true"}, timeout=60)
-        if r.status_code in (400, 404, 422):     # ID مش موجود: نكمل
+        if r.status_code in (400, 404, 422):
             continue
         r.raise_for_status()
         data = r.json()["audio_file"]
@@ -258,7 +265,6 @@ def _ts_context(timestamps, ayah, span=2):
 
 
 def validate_timestamps(timestamps, tolerance=0.3):
-    """بعض القراء توقيتاتهم غير سليمة (مدة سالبة/تداخل). نرفضها بدل ما نقص صوت غلط."""
     prev_end = 0.0
     for ayah in sorted(timestamps):
         t = timestamps[ayah]
@@ -291,7 +297,6 @@ def fetch_surah_data(surah_num, reciter_key):
 
 
 def check_reciters():
-    """وضع الفحص: يتأكد من كل القراء من غير ما ينتج فيديو."""
     print("[*] فحص القراء المعرّفين (سورة 112 كعينة)...")
     for key, cfg in RECITERS.items():
         try:
@@ -307,7 +312,7 @@ def check_reciters():
 
 
 # ----------------------------------------------------------------------------
-# 3. اختيار المقطع التالي (بدون أي تغيير)
+# 3. اختيار المقطع التالي (بدون تغيير)
 # ----------------------------------------------------------------------------
 def find_next_clip(conn, surah_num, timestamps, reciter_key):
     total = len(timestamps)
@@ -329,16 +334,15 @@ def find_next_clip(conn, surah_num, timestamps, reciter_key):
             return start, end, dur
         if dur > MAX_CLIP_SEC:
             if start == end:
-                return start, end, dur          # آية طويلة واحدة
+                return start, end, dur
             return start, end - 1, timestamps[end - 1]["to"] - timestamps[start]["from"]
         end += 1
 
-    # وصلنا لنهاية السورة: ننتج الباقي مهما كان قصيراً حتى لا تضيع آخر الآيات
     return start, total, timestamps[total]["to"] - timestamps[start]["from"]
 
 
 # ----------------------------------------------------------------------------
-# 4. فيديو الخلفية
+# 4. فيديو الخلفية (بيشتغل بس لو BG_MODE=video)
 # ----------------------------------------------------------------------------
 BAD_TAGS = {"person", "people", "woman", "women", "man", "men", "girl", "boy", "face",
             "child", "children", "couple", "portrait", "model", "family"}
@@ -352,7 +356,6 @@ CATEGORIES = [
 
 
 def pick_variant(videos):
-    """يفضّل أعلى دقة بحجم معقول (4K يعطي حدة أفضل عند القص الرأسي)."""
     options = [v for v in videos.values() if isinstance(v, dict) and v.get("url")]
     if not options:
         return None
@@ -386,7 +389,6 @@ def get_pixabay_video():
                              & BAD_TAGS)]
             if not hits:
                 continue
-            # نفضّل المقاطع الأطول لتقليل ظهور نقطة التكرار
             long_hits = [h for h in hits if h.get("duration", 0) >= 15] or hits
             random.shuffle(long_hits)
 
@@ -413,7 +415,7 @@ def get_pixabay_video():
 
 
 # ----------------------------------------------------------------------------
-# 5. تقسيم النص وتوقيت الشرائح
+# 5. تقسيم النص وتوقيت الكلمات
 # ----------------------------------------------------------------------------
 def split_words(text):
     """يقسم الآية لكلمات ويلصق علامات الوقف المنفصلة بالكلمة السابقة."""
@@ -426,8 +428,8 @@ def split_words(text):
     return words
 
 
-def plan_chunks(words, max_w=4):
-    """يرجع قائمة (بداية, نهاية) لكل شريحة: يقطع عند علامات الوقف ثم يوزع الكلمات بالتساوي (≤4)."""
+def plan_chunks(words, max_w=MAX_WORDS_PER_LINE):
+    """يرجع قائمة (بداية, نهاية) لكل سطر: يقطع عند علامات الوقف ثم يوزع الكلمات بالتساوي (≤4)."""
     n = len(words)
     if n == 0:
         return []
@@ -439,7 +441,7 @@ def plan_chunks(words, max_w=4):
     phrases.append([s, n])
 
     merged = []
-    for p in phrases:                      # دمج العبارات القصيرة جداً (كلمة واحدة)
+    for p in phrases:
         if merged and (p[1] - p[0] < 2 or merged[-1][1] - merged[-1][0] < 2):
             merged[-1][1] = p[1]
         else:
@@ -478,80 +480,251 @@ def word_starts(ayah_ts, n_words):
     except (KeyError, ValueError, TypeError):
         return None
 
-    if arr[0] < a_from - 1.0 and arr[-1] <= (a_to - a_from) + 1.0:   # توقيتات نسبية لبداية الآية
+    if arr[0] < a_from - 1.0 and arr[-1] <= (a_to - a_from) + 1.0:
         arr = [x + a_from for x in arr]
     in_range = all(a_from - 0.6 <= x <= a_to + 0.6 for x in arr)
     increasing = all(arr[i] <= arr[i + 1] for i in range(len(arr) - 1))
     return arr if (in_range and increasing) else None
 
 
-def chunk_times(ayah_ts, words, plan):
-    a_from, a_to = ayah_ts["from"], ayah_ts["to"]
+def word_start_times(ayah_ts, words):
+    """وقت بداية كل كلمة (مطلق داخل ملف السورة). بديل: توزيع حسب عدد الحروف."""
     starts = word_starts(ayah_ts, len(words))
     if starts:
-        bounds = [starts[i0] for i0, _ in plan]
-        bounds[0] = a_from
-        ends = bounds[1:] + [a_to]
-        if all(e - s >= 0.2 for s, e in zip(bounds, ends)):
-            return list(zip(bounds, ends))
-    # بديل: توزيع حسب عدد الحروف
-    weights = [max(1, sum(len(w) for w in words[i0:i1])) for i0, i1 in plan]
-    total, t, out = sum(weights), a_from, []
+        return starts
+    a_from, a_to = ayah_ts["from"], ayah_ts["to"]
+    weights = [max(1, len(w)) for w in words]
+    total, acc, out = sum(weights), 0, []
     for wt in weights:
-        dt = (a_to - a_from) * wt / total
-        out.append((t, t + dt))
-        t += dt
+        out.append(a_from + (a_to - a_from) * acc / total)
+        acc += wt
     return out
 
 
 # ----------------------------------------------------------------------------
-# 6. رسم الشرائح
+# 6. واجهة المشغّل (شكل الصورة) + رسم الكلمات كلمة بكلمة
 # ----------------------------------------------------------------------------
 def load_font(path, size):
     return ImageFont.truetype(path, size, layout_engine=ImageFont.Layout.RAQM)
 
 
-def fit_font_size(font_path, texts, start=100, minimum=52, max_width=W - 160):
-    """حجم خط واحد ثابت لكل الفيديو (يمنع تغير الحجم بين الشرائح)."""
+def ar_len(font, text):
+    return font.getlength(text, direction="rtl", language="ar")
+
+
+def fit_font_size(font_path, texts, start=96, minimum=44, max_width=W - 230):
+    """حجم خط واحد ثابت لكل الفيديو (يمنع تغير الحجم بين الأسطر)."""
     size = start
     while size > minimum:
         font = load_font(font_path, size)
-        if all(font.getlength(t, direction="rtl", language="ar") <= max_width for t in texts):
+        if all(ar_len(font, t) <= max_width for t in texts):
             break
         size -= 4
     return size
 
 
-def render_slide(font_path, font_size, phrase, header, out_path):
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    cx, y = W // 2, int(H * 0.46)
+def fit_ui(path, text, size, max_w, minimum=30):
+    while size > minimum:
+        f = load_font(path, size)
+        if ar_len(f, text) <= max_w:
+            return f
+        size -= 2
+    return load_font(path, minimum)
 
-    header_font = load_font(font_path, 50)
-    font = load_font(font_path, font_size)
 
-    # ظل ناعم (Blur) خلف النصوص لرفع التباين
-    shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    sd = ImageDraw.Draw(shadow)
-    sd.text((cx, 235), header, font=header_font, fill=(0, 0, 0, 200), anchor="mm", direction="rtl", language="ar")
-    sd.text((cx, y + 6), phrase, font=font, fill=(0, 0, 0, 230), anchor="mm", direction="rtl", language="ar")
-    shadow = shadow.filter(ImageFilter.GaussianBlur(14))
-    img = Image.alpha_composite(img, shadow)
+def fmt_time(sec):
+    sec = int(max(0, sec))
+    return f"{sec // 60:02d}:{sec % 60:02d}"
 
-    d = ImageDraw.Draw(img)
-    d.text((cx, 235), header, font=header_font, fill=(255, 215, 90, 255), anchor="mm",
-           direction="rtl", language="ar", stroke_width=3, stroke_fill=(0, 0, 0, 200))
-    d.text((cx, y), phrase, font=font, fill=(255, 255, 255, 255), anchor="mm",
-           direction="rtl", language="ar", stroke_width=6, stroke_fill=(0, 0, 0, 235))
-    img.save(out_path, "PNG")
+
+def ar_text(d, xy, text, font, fill, anchor="rm"):
+    d.text(xy, text, font=font, fill=fill, anchor=anchor, direction="rtl", language="ar")
+
+
+def draw_chip(d, right, cy, label, value, font, h=84):
+    pad, gap = 28, 10
+    lw, vw = ar_len(font, label), ar_len(font, value)
+    left = right - (lw + gap + vw + 2 * pad)
+    d.rounded_rectangle((left, cy - h // 2, right, cy + h // 2), radius=30,
+                        fill=(16, 16, 16, 235), outline=RING, width=3)
+    ar_text(d, (right - pad, cy), label, font, GREY)
+    ar_text(d, (right - pad - lw - gap, cy), value, font, WHITE)
+    return left
+
+
+def circle_button(d, cx, cy, r=80):
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=BTN_FILL, outline=BTN_LINE, width=2)
+
+
+def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, source_text,
+                  full_dur, t_start):
+    """يبني الطبقة الثابتة مرة واحدة ويرجّع دالة render(state, sec) -> bytes (RGBA خام)."""
+    qfont = load_font(font_path, size)
+    line_h = int(size * 1.55)
+    card_h = LINES_PER_CARD * line_h + 120
+
+    OY = 150                                  # إزاحة لتحت (بعيداً عن واجهة شورتس العلوية)
+    card_top = OY + 470
+    cy = card_top + card_h // 2
+    bar_y = card_top + card_h + 90
+    times_y = bar_y + 64
+    ctrl_y = bar_y + 250
+    BX0, BX1 = 60, W - 60
+
+    base = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(base)
+
+    # مقبض السحب
+    d.rounded_rectangle((W // 2 - 55, OY + 50, W // 2 + 55, OY + 62), radius=6, fill=(105, 105, 105, 255))
+
+    # زر السهم لأسفل
+    bx, by = 110, OY + 190
+    circle_button(d, bx, by, 62)
+    d.line([(bx - 20, by - 8), (bx, by + 12), (bx + 20, by - 8)], fill=WHITE, width=8, joint="curve")
+
+    # الأسطوانة
+    vx, vy = W - 150, OY + 205
+    d.ellipse((vx - 95, vy - 95, vx + 95, vy + 95), fill=(10, 10, 10, 255), outline=(95, 95, 95, 255), width=6)
+    d.ellipse((vx - 82, vy - 82, vx + 82, vy + 82), outline=(45, 45, 45, 255), width=2)
+    d.ellipse((vx - 66, vy - 66, vx + 66, vy + 66), outline=WHITE, width=9)
+    d.ellipse((vx - 13, vy - 13, vx + 13, vy + 13), fill=(150, 150, 150, 255))
+
+    # النصوص العلوية (السورة + نطاق الآيات / القارئ)
+    xr = W - 290
+    ar_text(d, (xr, OY + 160), header_text, fit_ui(ui_path, header_text, 46, xr - 190), WHITE)
+    ar_text(d, (xr, OY + 250), reciter_name, fit_ui(ui_path, reciter_name, 62, xr - 190), WHITE)
+
+    # الشارتان (المصدر / النسخة)
+    chips = [("المصدر:", source_text), ("النسخة:", "نسخة أصلية")]
+    chip_size = 36
+    while chip_size > 24:
+        cf = load_font(ui_path, chip_size)
+        total = sum(ar_len(cf, a) + 10 + ar_len(cf, b) + 56 for a, b in chips) + 20 * (len(chips) - 1)
+        if total <= W - 60 - 190:
+            break
+        chip_size -= 2
+    cf = load_font(ui_path, chip_size)
+    right = W - 60
+    for a, b in chips:
+        right = draw_chip(d, right, OY + 385, a, b, cf) - 20
+
+    # زر العين
+    ex, ey = 110, OY + 385
+    circle_button(d, ex, ey, 50)
+    d.ellipse((ex - 28, ey - 16, ex + 28, ey + 16), outline=WHITE, width=4)
+    d.ellipse((ex - 8, ey - 8, ex + 8, ey + 8), outline=WHITE, width=4)
+
+    # كارت الآية
+    d.rounded_rectangle((50, card_top, W - 50, card_top + card_h), radius=70,
+                        fill=(0, 0, 0, 215), outline=(82, 82, 82, 255), width=3)
+
+    # شريط التقدم (المسار)
+    d.rounded_rectangle((BX0, bar_y - 8, BX1, bar_y + 8), radius=8, fill=BAR_TRACK)
+
+    # أزرار التحكم: تقديم | إيقاف | رجوع | تكرار
+    xs = [W // 2 - 300, W // 2 - 100, W // 2 + 100, W // 2 + 300]
+    circle_button(d, xs[0], ctrl_y)
+    for dx in (-14, 10):
+        x = xs[0] + dx
+        d.polygon([(x - 12, ctrl_y - 18), (x - 12, ctrl_y + 18), (x + 16, ctrl_y)], fill=WHITE)
+    d.rounded_rectangle((xs[1] - 38, ctrl_y - 62, xs[1] - 10, ctrl_y + 62), radius=8, fill=WHITE)
+    d.rounded_rectangle((xs[1] + 10, ctrl_y - 62, xs[1] + 38, ctrl_y + 62), radius=8, fill=WHITE)
+    circle_button(d, xs[2], ctrl_y)
+    for dx in (-10, 14):
+        x = xs[2] + dx
+        d.polygon([(x + 12, ctrl_y - 18), (x + 12, ctrl_y + 18), (x - 16, ctrl_y)], fill=WHITE)
+    circle_button(d, xs[3], ctrl_y)
+    x = xs[3]
+    d.line([(x - 28, ctrl_y - 16), (x + 18, ctrl_y - 16)], fill=WHITE, width=6)
+    d.polygon([(x + 16, ctrl_y - 30), (x + 16, ctrl_y - 2), (x + 36, ctrl_y - 16)], fill=WHITE)
+    d.line([(x + 28, ctrl_y + 16), (x - 18, ctrl_y + 16)], fill=WHITE, width=6)
+    d.polygon([(x - 16, ctrl_y + 2), (x - 16, ctrl_y + 30), (x - 36, ctrl_y + 16)], fill=WHITE)
+
+    # تخطيط كلمات كل صفحة (يمين → يسار، كل كلمة بمكان ثابت)
+    sp = max(qfont.getlength(" ", direction="rtl", language="ar"), size * 0.25)
+    layouts = []
+    for pg in pages:
+        n = len(pg["lines"])
+        lay = []
+        for li, line in enumerate(pg["lines"]):
+            widths = [ar_len(qfont, u) for u in line]
+            total = sum(widths) + sp * (len(widths) - 1)
+            x = W / 2 + total / 2
+            yc = cy + (li - (n - 1) / 2) * line_h
+            pos = []
+            for w in widths:
+                pos.append((x, yc + size * 0.28))
+                x -= w + sp
+            lay.append(pos)
+        layouts.append([xy for line in lay for xy in line])
+    flats = [[u for line in pg["lines"] for u in line] for pg in pages]
+
+    f_time = load_font(ui_path, 42)
+    total_s = int(round(full_dur))
+
+    def render(state, sec):
+        img = base.copy()
+        dr = ImageDraw.Draw(img)
+        pi, k = state
+        for i, (u, (x, y)) in enumerate(list(zip(flats[pi], layouts[pi]))[:k]):
+            color = GOLD if (HIGHLIGHT and i == k - 1) else WHITE
+            dr.text((x, y), u, font=qfont, fill=color, anchor="rs", direction="rtl", language="ar")
+        frac = min(1.0, sec / total_s) if total_s > 0 else 0.0
+        fw = int((BX1 - BX0) * frac)
+        if fw > 0:
+            dr.rounded_rectangle((BX0, bar_y - 8, BX0 + max(fw, 16), bar_y + 8), radius=8, fill=BAR_FILL)
+        dr.text((BX0, times_y), fmt_time(sec), font=f_time, fill=GREY, anchor="lm", direction="ltr")
+        dr.text((BX1, times_y), "-" + fmt_time(total_s - sec), font=f_time, fill=GREY,
+                anchor="rm", direction="ltr")
+        return img.tobytes()
+
+    return render
+
+
+def build_timeline(pages, duration, t_start):
+    """يرجّع قائمة مقاطع (بداية, نهاية, (صفحة, عدد الكلمات الظاهرة), ثانية_المشغّل)."""
+    events = []
+    for pi, pg in enumerate(pages):
+        flat = [t for line in pg["starts"] for t in line]
+        for k, t in enumerate(flat, start=1):
+            events.append((min(max(t, 0.0), duration), pi, k))
+    events.sort(key=lambda e: e[0])
+    states = [(0.0, (0, 0))] + [(t, (pi, k)) for t, pi, k in events]
+
+    ticks = [s - t_start for s in range(int(t_start) + 1, int(t_start + duration) + 1)]
+    bounds = sorted({0.0, duration} | {t for t, _ in states} | {x for x in ticks if 0 < x < duration})
+    segs, j, cur = [], 0, states[0][1]
+    for a, b in zip(bounds, bounds[1:]):
+        while j < len(states) and states[j][0] <= a + 1e-6:
+            cur = states[j][1]
+            j += 1
+        if b - a > 1e-6:
+            segs.append((a, b, cur, int(t_start + a + 1e-6)))
+    return segs
 
 
 # ----------------------------------------------------------------------------
 # 7. بناء الفيديو
 # ----------------------------------------------------------------------------
-def encode(cmd_builder, out_file):
+def stream_encode(cmd, frames):
+    """يبعت الفريمات الخام لـ ffmpeg عن طريق pipe."""
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        for buf, n in frames:
+            for _ in range(n):
+                p.stdin.write(buf)
+        p.stdin.close()
+    except BrokenPipeError:
+        pass
+    err = p.stderr.read().decode(errors="replace")
+    if p.wait() != 0:
+        raise RuntimeError(f"فشل ffmpeg:\n{err[-3000:]}")
+
+
+def encode(cmd_builder, frames_factory, out_file):
     """يجرب أكثر من CRF حتى يدخل الحجم تحت حد تليجرام."""
     for crf in (19, 23, 27):
-        run(cmd_builder(crf), f"ffmpeg (crf={crf})")
+        stream_encode(cmd_builder(crf), frames_factory())
         size = os.path.getsize(out_file)
         print(f"[*] CRF {crf} → {size / 1024 / 1024:.1f} MB")
         if size <= TELEGRAM_LIMIT_BYTES:
@@ -562,6 +735,7 @@ def encode(cmd_builder, out_file):
 def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, timestamps,
                 audio_url, start_ayah, end_ayah, bg_video):
     font_path = find_font()
+    ui_path = find_ui_font()
 
     # --- الصوت ---
     full_audio = os.path.join(TEMP_DIR, f"full_{surah_num}_{reciter_key}.mp3")
@@ -577,80 +751,69 @@ def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, t
     t_start = timestamps[start_ayah]["from"]
     t_end = timestamps[end_ayah]["to"]
 
-    # تأكد إن ملف الصوت فعلاً يغطي التوقيتات (يكشف عدم تطابق الملف مع بيانات التوقيت)
     full_dur = probe_duration(full_audio)
     if t_end > full_dur + 0.5:
         raise RuntimeError(f"التوقيت ({t_end:.1f}ث) أطول من ملف الصوت ({full_dur:.1f}ث): "
                            f"الملف مش مطابق لبيانات التوقيت، تم الإيقاف.")
 
     cut_audio = os.path.join(TEMP_DIR, "cut.mp3")
-    # إعادة ترميز (بدل copy) + seek دقيق بعد -i لضمان مزامنة الكلمات
     run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", full_audio,
          "-ss", f"{t_start:.3f}", "-to", f"{t_end:.3f}", "-c:a", "libmp3lame", "-q:a", "2", cut_audio],
         "قص الصوت")
     duration = probe_duration(cut_audio)
 
-    # --- الشرائح ---
-    slides = []   # (نص, بداية, نهاية)
+    # --- الصفحات: كل صفحة = سطر أو سطرين (≤4 كلمات للسطر) من نفس الآية ---
+    pages = []
     for ayah in range(start_ayah, end_ayah + 1):
         words = split_words(verses_text[ayah])
+        if not words:
+            continue
         plan = plan_chunks(words)
-        times = chunk_times(timestamps[ayah], words, plan)
+        starts = word_start_times(timestamps[ayah], words)
         num_ar = str(ayah).translate(ARABIC_DIGITS)
-        for k, ((i0, i1), (s, e)) in enumerate(zip(plan, times)):
-            text = " ".join(words[i0:i1])
-            if k == len(plan) - 1:
-                text += f" \u06dd{num_ar}"
-            s = max(0.0, s - t_start)
-            e = min(duration, e - t_start)
-            if e - s > 0.05:
-                slides.append((text, s, e))
+        units = words[:-1] + [f"{words[-1]} \u06dd{num_ar}"]      # رقم الآية يظهر مع آخر كلمة
+        lines = [(units[a:b], [max(0.0, min(duration, s - t_start)) for s in starts[a:b]])
+                 for a, b in plan]
+        for i in range(0, len(lines), LINES_PER_CARD):
+            grp = lines[i:i + LINES_PER_CARD]
+            pages.append({"lines": [g[0] for g in grp], "starts": [g[1] for g in grp]})
 
-    if not slides:
-        raise RuntimeError("لا توجد شرائح لتصديرها")
+    if not pages:
+        raise RuntimeError("لا توجد صفحات لتصديرها")
 
-    header = f"سورة {surah_name} | {reciter_name}"
-    size = fit_font_size(font_path, [t for t, _, _ in slides])
-    print(f"[*] عدد الشرائح: {len(slides)} | حجم الخط: {size}")
+    size = fit_font_size(font_path, [" ".join(l) for p in pages for l in p["lines"]])
+    n_words = sum(len(l) for p in pages for l in p["lines"])
+    print(f"[*] الصفحات: {len(pages)} | الكلمات: {n_words} | حجم الخط: {size}")
 
-    slide_files = []
-    for i, (text, s, e) in enumerate(slides):
-        p = os.path.join(TEMP_DIR, f"phrase_{i}.png")
-        render_slide(font_path, size, text, header, p)
-        slide_files.append((p, s, e))
+    # --- معلومات الواجهة (بتتغير مع كل مقطع) ---
+    num_txt = str(surah_num).zfill(2).translate(ARABIC_DIGITS)
+    a1 = str(start_ayah).translate(ARABIC_DIGITS)
+    a2 = str(end_ayah).translate(ARABIC_DIGITS)
+    rng = a1 if start_ayah == end_ayah else f"{a1}-{a2}"
+    header_text = f"{num_txt}-{surah_name} {rng}"
+    source_text = "المصحف المجوّد" if "mujawwad" in reciter_key else "المصحف المرتل"
 
-    # --- ffmpeg ---
-    inputs = []
-    if bg_video and os.path.exists(bg_video):
-        inputs += ["-stream_loop", "-1", "-i", bg_video]
-        grade = ("scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,"
-                 f"fps={FPS},"
-                 "eq=saturation=1.25:contrast=1.1,"
-                 "unsharp=5:5:0.6:5:5:0.0,"
-                 "vignette=PI/5,"
-                 "drawbox=x=0:y=0:w=iw:h=ih:t=fill:c=black@0.30,"
-                 "format=yuv420p")
-        filters = f"[0:v]{grade}[bg];"
-        last = "[bg]"
+    render = make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, source_text,
+                           full_dur, t_start)
+    segs = build_timeline(pages, duration, t_start)
+
+    def frames_factory():
+        for a, b, state, sec in segs:
+            n = round(b * FPS) - round(a * FPS)
+            if n > 0:
+                yield render(state, sec), n
+
+    # --- ffmpeg: [0] خلفية | [1] فريمات الواجهة (pipe) | [2] الصوت ---
+    if BG_MODE == "video" and bg_video and os.path.exists(bg_video):
+        bg_inputs = ["-stream_loop", "-1", "-i", bg_video]
+        bg_filter = ("[0:v]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,"
+                     f"fps={FPS},eq=saturation=1.25:contrast=1.1,unsharp=5:5:0.6:5:5:0.0,vignette=PI/5,"
+                     "drawbox=x=0:y=0:w=iw:h=ih:t=fill:c=black@0.40,format=yuv420p[bg];")
     else:
-        inputs += ["-f", "lavfi", "-i", f"color=c=0x08131d:s={W}x{H}:r={FPS}:d={duration:.3f}"]
-        filters = "[0:v]format=yuv420p[bg];"
-        last = "[bg]"
+        bg_inputs = ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={FPS}:d={duration + 1:.3f}"]
+        bg_filter = "[0:v]format=yuv420p[bg];"
 
-    for idx, (path, s, e) in enumerate(slide_files, start=1):
-        d = e - s
-        fade = max(0.05, min(0.2, d / 3))
-        inputs += ["-loop", "1", "-framerate", str(FPS), "-t", f"{d:.3f}", "-i", path]
-        filters += (f"[{idx}:v]format=rgba,"
-                    f"fade=t=in:st=0:d={fade:.3f}:alpha=1,"
-                    f"fade=t=out:st={d - fade:.3f}:d={fade:.3f}:alpha=1,"
-                    f"setpts=PTS+{s:.3f}/TB[s{idx}];")
-        filters += (f"{last}[s{idx}]overlay=0:0:eof_action=pass:"
-                    f"enable='between(t,{s:.3f},{e:.3f})'[v{idx}];")
-        last = f"[v{idx}]"
-    audio_idx = len(slide_files) + 1
-    filters = filters.rstrip(";")
-
+    filters = bg_filter + "[bg][1:v]overlay=0:0:eof_action=repeat:format=auto,format=yuv420p[v]"
     afilter = (f"loudnorm=I=-16:TP=-1.5:LRA=11,"
                f"afade=t=in:st=0:d=0.15,afade=t=out:st={max(0.0, duration - 0.5):.3f}:d=0.5")
 
@@ -658,9 +821,11 @@ def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, t
 
     def cmd_builder(crf):
         return ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                *inputs, "-i", cut_audio,
+                *bg_inputs,
+                "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{H}", "-framerate", str(FPS), "-i", "-",
+                "-i", cut_audio,
                 "-filter_complex", filters,
-                "-map", last, "-map", f"{audio_idx}:a",
+                "-map", "[v]", "-map", "2:a",
                 "-af", afilter,
                 "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
                 "-maxrate", "6M", "-bufsize", "12M",
@@ -671,16 +836,9 @@ def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, t
                 "-t", f"{duration:.3f}", out_file]
 
     print("[*] جاري تصدير الفيديو...")
-    size_bytes = encode(cmd_builder, out_file)
+    size_bytes = encode(cmd_builder, frames_factory, out_file)
     if size_bytes > MAX_FILE_SIZE_BYTES:
         raise ValueError(f"حجم الفيديو تجاوز 100 ميجا: {size_bytes / 1024 / 1024:.1f} MB")
-
-    # تنظيف ملفات الشرائح المؤقتة
-    for p, _, _ in slide_files:
-        try:
-            os.remove(p)
-        except OSError:
-            pass
 
     return out_file, duration
 
@@ -695,11 +853,10 @@ def generate_video(conn, surah_num, reciter_key, bg_video=None):
     if not clip:
         return None
     start_ayah, end_ayah, est = clip
-    # بنتحقق من توقيت الآيات المستخدمة في المقطع ده بس (غلط في آية بعيدة ما يوقفش المقطع)
     validate_timestamps({a: timestamps[a] for a in range(start_ayah, end_ayah + 1)})
     print(f"[+] سورة {surah_name}: الآيات {start_ayah}-{end_ayah} (≈{est:.1f} ث)")
 
-    if bg_video is None:
+    if BG_MODE == "video" and bg_video is None:
         bg_video = get_pixabay_video()
 
     out_file, duration = build_video(surah_num, reciter_key, reciter["name"], surah_name, verses,
@@ -711,7 +868,7 @@ def generate_video(conn, surah_num, reciter_key, bg_video=None):
 
 
 # ----------------------------------------------------------------------------
-# 8. التسليم: Telegram / GitHub / Make
+# 8. التسليم: Telegram / GitHub / Make (بدون تغيير)
 # ----------------------------------------------------------------------------
 def send_to_telegram(clip):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -759,7 +916,7 @@ def upload_to_github_release(video_path, tag_name="latest", keep_assets=15):
     release_id = release["id"]
 
     assets = release.get("assets", [])
-    for a in assets:                                   # احذف نسخة بنفس الاسم
+    for a in assets:
         if a["name"] == file_name:
             requests.delete(a["url"], headers=headers, timeout=60)
     old = sorted([a for a in assets if a["name"] != file_name], key=lambda a: a["created_at"])
@@ -801,6 +958,8 @@ def main():
     check_environment()
     if PROGRESS_MODE not in ("shared", "per_reciter"):
         raise SystemExit(f"PROGRESS_MODE غير معروف: {PROGRESS_MODE} (المتاح: shared / per_reciter)")
+    if BG_MODE not in ("black", "video"):
+        raise SystemExit(f"BG_MODE غير معروف: {BG_MODE} (المتاح: black / video)")
     reciter_key = os.environ.get("RECITER", "minshawi")
     if reciter_key not in RECITERS:
         raise SystemExit(f"RECITER غير معروف: {reciter_key}. المتاح: {', '.join(RECITERS)}")
