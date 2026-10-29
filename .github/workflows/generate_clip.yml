@@ -92,7 +92,7 @@ jobs:
           # shared = يكمل بعد آخر مقطع في الداتا بيز (أي قارئ) | per_reciter = تقدم مستقل لكل قارئ
           PROGRESS_MODE: ${{ vars.PROGRESS_MODE || 'shared' }}
           CHECK_RECITERS: ${{ inputs.check_reciters && '1' || '0' }}
-          BG_MODE: ${{ vars.BG_MODE || 'black' }}
+          BG_MODE: ${{ vars.BG_MODE || 'video' }}
           LINES_PER_CARD: ${{ vars.LINES_PER_CARD || '2' }}
           HIGHLIGHT: ${{ vars.HIGHLIGHT || '0' }}
         run: |
