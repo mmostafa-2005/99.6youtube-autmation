@@ -31,7 +31,7 @@ import sys
 import traceback
 
 import requests
-from PIL import Image, ImageDraw, ImageFont, features
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, features
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -589,12 +589,14 @@ def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, fu
     qfont = load_font(font_path, size)
     line_h = int(size * 1.55)
 
-    cy = int(H * 0.47)                        # مركز الآيات
-    bar_y = 1430
-    times_y = bar_y + 64
-    BX0, BX1 = 60, W - 60
+    cy = int(H * 0.54)                        # مركز الآيات (نص الشاشه أو أسفل شوية)
 
     base = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    # ظل ناعم خلف الآيات لرفع الوضوح من غير ما نغمّق الفيديو كله
+    scrim = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(scrim).rounded_rectangle((40, cy - line_h - 40, W - 40, cy + line_h + 40),
+                                            radius=90, fill=(0, 0, 0, 120))
+    base.alpha_composite(scrim.filter(ImageFilter.GaussianBlur(55)))
     d = ImageDraw.Draw(base)
 
     # اللوجو داخل الدايرة (أو أسطوانة لو اللوجو مش موجود)
@@ -613,9 +615,6 @@ def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, fu
     xr = W - 290
     ar_text(d, (xr, vy - 45), header_text, fit_ui(ui_path, header_text, 46, xr - 60), WHITE)
     ar_text(d, (xr, vy + 45), reciter_name, fit_ui(ui_path, reciter_name, 62, xr - 60), WHITE)
-
-    # مسار شريط التقدم
-    d.rounded_rectangle((BX0, bar_y - 8, BX1, bar_y + 8), radius=8, fill=(255, 255, 255, 70))
 
     # تخطيط كلمات كل صفحة (يمين → يسار، كل كلمة بمكان ثابت)
     sp = max(qfont.getlength(" ", direction="rtl", language="ar"), size * 0.25)
@@ -636,9 +635,6 @@ def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, fu
         layouts.append([xy for line in lay for xy in line])
     flats = [[u for line in pg["lines"] for u in line] for pg in pages]
 
-    f_time = load_font(ui_path, 42)
-    total_s = int(round(full_dur))
-
     def render(state, sec):
         img = base.copy()
         pi, k, lvl = state
@@ -650,15 +646,6 @@ def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, fu
             color = GOLD if (HIGHLIGHT and i == k - 1) else WHITE
             a = lvl / FADE_FRAMES if (i == k - 1 and lvl < FADE_FRAMES) else 1.0
             draw_word(img, u, x, y, w, qfont, size, color, a)
-        dr = ImageDraw.Draw(img)
-        frac = min(1.0, sec / total_s) if total_s > 0 else 0.0
-        fw = int((BX1 - BX0) * frac)
-        if fw > 0:
-            dr.rounded_rectangle((BX0, bar_y - 8, BX0 + max(fw, 16), bar_y + 8), radius=8, fill=BAR_FILL)
-        for xy, txt, anc in (((BX0, times_y), fmt_time(sec), "lm"),
-                             ((BX1, times_y), "-" + fmt_time(total_s - sec), "rm")):
-            dr.text(xy, txt, font=f_time, fill=(235, 235, 235, 255), anchor=anc, direction="ltr",
-                    stroke_width=2, stroke_fill=(0, 0, 0, 200))
         return img.tobytes()
 
     return render
@@ -675,7 +662,7 @@ def build_timeline(pages, duration, t_start):
     states = [(0.0, (0, 0))] + [(t, (pi, k)) for t, pi, k in events]
     fade_pts = {t + i / FPS for t, _, _ in events for i in range(1, FADE_FRAMES)}
 
-    ticks = [s - t_start for s in range(int(t_start) + 1, int(t_start + duration) + 1)]
+    ticks = []                                # مفيش عداد وقت، فمفيش تقطيع كل ثانية
     bounds = sorted({0.0, duration} | {t for t, _ in states} | {x for x in ticks if 0 < x < duration} | {x for x in fade_pts if 0 < x < duration})
     segs, j, cur, cur_t = [], 0, states[0][1], 0.0
     for a, b in zip(bounds, bounds[1:]):
@@ -708,7 +695,7 @@ def stream_encode(cmd, frames):
 
 def encode(cmd_builder, frames_factory, out_file):
     """يجرب أكثر من CRF حتى يدخل الحجم تحت حد تليجرام."""
-    for crf in (19, 23, 27):
+    for crf in (17, 21, 25):
         stream_encode(cmd_builder(crf), frames_factory())
         size = os.path.getsize(out_file)
         print(f"[*] CRF {crf} → {size / 1024 / 1024:.1f} MB")
@@ -791,8 +778,8 @@ def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, t
     if BG_MODE == "video" and bg_video and os.path.exists(bg_video):
         bg_inputs = ["-stream_loop", "-1", "-i", bg_video]
         bg_filter = ("[0:v]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,"
-                     f"fps={FPS},eq=saturation=1.25:contrast=1.1,unsharp=5:5:0.6:5:5:0.0,vignette=PI/5,"
-                     "drawbox=x=0:y=0:w=iw:h=ih:t=fill:c=black@0.45,format=yuv420p[bg];")
+                     f"fps={FPS},eq=saturation=1.55:contrast=1.12:brightness=0.02,unsharp=5:5:0.8:5:5:0.0,"
+                     "drawbox=x=0:y=0:w=iw:h=ih:t=fill:c=black@0.15,format=yuv420p[bg];")
     else:
         bg_inputs = ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={FPS}:d={duration + 1:.3f}"]
         bg_filter = "[0:v]format=yuv420p[bg];"
@@ -812,7 +799,7 @@ def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, t
                 "-map", "[v]", "-map", "2:a",
                 "-af", afilter,
                 "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
-                "-maxrate", "6M", "-bufsize", "12M",
+                "-maxrate", "9M", "-bufsize", "18M",
                 "-profile:v", "high", "-pix_fmt", "yuv420p", "-r", str(FPS),
                 "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
                 "-c:a", "aac", "-b:a", "160k", "-ar", "44100",
