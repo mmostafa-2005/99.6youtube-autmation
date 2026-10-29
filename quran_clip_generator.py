@@ -14,7 +14,7 @@ Quran short-video generator (v2.2: ظهور كلمة بكلمة + شكل مشغ�
     FONT_PATH       مسار خط بديل
     PROGRESS_MODE   shared (الافتراضي) | per_reciter
     CHECK_RECITERS  لو = 1: يفحص كل القراء المعرّفين ويطبع النتيجة فقط
-    BG_MODE         black (الافتراضي: خلفية سوداء زي المشغّل) | video (فيديو طبيعة من Pixabay)
+    BG_MODE         video (الافتراضي: فيديو طبيعة من Pixabay) | black (خلفية سوداء)
     LINES_PER_CARD  عدد الأسطر في الكارت: 1 أو 2 (الافتراضي 2) - كل سطر 4 كلمات بالكتير
     HIGHLIGHT       لو = 1: الكلمة اللي بتتقال دلوقتي تظهر بلون ذهبي (الافتراضي 0)
     FADE_FRAMES     مدة fade-in لكل كلمة بالفريمات (الافتراضي 6 ≈ 0.2 ثانية، 1 = من غير fade)
@@ -80,7 +80,7 @@ MIN_CLIP_SEC, MAX_CLIP_SEC = 25.0, 65.0
 MAX_WORDS_PER_LINE = 4
 
 PROGRESS_MODE = os.environ.get("PROGRESS_MODE", "shared").strip().lower()
-BG_MODE = os.environ.get("BG_MODE", "black").strip().lower()
+BG_MODE = os.environ.get("BG_MODE", "video").strip().lower()
 LINES_PER_CARD = min(2, max(1, int(os.environ.get("LINES_PER_CARD", "2") or 2)))
 HIGHLIGHT = os.environ.get("HIGHLIGHT", "0").strip() == "1"
 FADE_FRAMES = max(1, int(os.environ.get("FADE_FRAMES", "6") or 6))   # مدة الـ fade-in بالفريمات (6 ≈ 0.2 ث)
@@ -541,23 +541,20 @@ def fmt_time(sec):
     return f"{sec // 60:02d}:{sec % 60:02d}"
 
 
-def ar_text(d, xy, text, font, fill, anchor="rm"):
-    d.text(xy, text, font=font, fill=fill, anchor=anchor, direction="rtl", language="ar")
+def ar_text(d, xy, text, font, fill, anchor="rm", stroke=3):
+    d.text(xy, text, font=font, fill=fill, anchor=anchor, direction="rtl", language="ar",
+           stroke_width=stroke, stroke_fill=(0, 0, 0, 210))
 
 
-def draw_chip(d, right, cy, label, value, font, h=84):
-    pad, gap = 28, 10
-    lw, vw = ar_len(font, label), ar_len(font, value)
-    left = right - (lw + gap + vw + 2 * pad)
-    d.rounded_rectangle((left, cy - h // 2, right, cy + h // 2), radius=30,
-                        fill=(16, 16, 16, 235), outline=RING, width=3)
-    ar_text(d, (right - pad, cy), label, font, GREY)
-    ar_text(d, (right - pad - lw - gap, cy), value, font, WHITE)
-    return left
-
-
-def circle_button(d, cx, cy, r=80):
-    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=BTN_FILL, outline=BTN_LINE, width=2)
+def draw_word(img, u, x, y, w, font, size, color, alpha=1.0):
+    """يرسم كلمة بحدود سودا وشفافية alpha (للـ fade) على طبقة صغيرة."""
+    x0, y0 = max(0, int(x - w - 30)), int(y - size * 1.0)
+    x1, y1 = min(W, int(x + 30)), int(y + size * 0.6)
+    layer = Image.new("RGBA", (x1 - x0, y1 - y0), color[:3] + (0,))
+    ImageDraw.Draw(layer).text((x - x0, y - y0), u, font=font, fill=color[:3] + (int(255 * alpha),),
+                               anchor="rs", direction="rtl", language="ar",
+                               stroke_width=6, stroke_fill=(0, 0, 0, int(235 * alpha)))
+    img.alpha_composite(layer, (x0, y0))
 
 
 def load_logo(diameter):
@@ -587,36 +584,22 @@ def load_logo(diameter):
         return None
 
 
-def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, source_text,
-                  full_dur, t_start):
+def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, full_dur, t_start):
     """يبني الطبقة الثابتة مرة واحدة ويرجّع دالة render(state, sec) -> bytes (RGBA خام)."""
     qfont = load_font(font_path, size)
     line_h = int(size * 1.55)
-    card_h = LINES_PER_CARD * line_h + 120
 
-    OY = 150                                  # إزاحة لتحت (بعيداً عن واجهة شورتس العلوية)
-    card_top = OY + 470
-    cy = card_top + card_h // 2
-    bar_y = card_top + card_h + 90
+    cy = int(H * 0.47)                        # مركز الآيات
+    bar_y = 1430
     times_y = bar_y + 64
-    ctrl_y = bar_y + 250
     BX0, BX1 = 60, W - 60
 
     base = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(base)
 
-    # مقبض السحب
-    d.rounded_rectangle((W // 2 - 55, OY + 50, W // 2 + 55, OY + 62), radius=6, fill=(105, 105, 105, 255))
-
-    # زر السهم لأسفل
-    bx, by = 110, OY + 190
-    circle_button(d, bx, by, 62)
-    d.line([(bx - 20, by - 8), (bx, by + 12), (bx + 20, by - 8)], fill=WHITE, width=8, joint="curve")
-
-    # الأسطوانة
-    vx, vy = W - 150, OY + 205
+    # اللوجو داخل الدايرة (أو أسطوانة لو اللوجو مش موجود)
+    vx, vy = W - 150, 250
     d.ellipse((vx - 95, vy - 95, vx + 95, vy + 95), fill=(10, 10, 10, 255), outline=(95, 95, 95, 255), width=6)
-    d.ellipse((vx - 82, vy - 82, vx + 82, vy + 82), outline=(45, 45, 45, 255), width=2)
     logo = load_logo(2 * 86)
     if logo is not None:
         base.alpha_composite(logo, (vx - 86, vy - 86))
@@ -626,56 +609,13 @@ def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, so
         d.ellipse((vx - 66, vy - 66, vx + 66, vy + 66), outline=WHITE, width=9)
         d.ellipse((vx - 13, vy - 13, vx + 13, vy + 13), fill=(150, 150, 150, 255))
 
-    # النصوص العلوية (السورة + نطاق الآيات / القارئ)
+    # السورة + نطاق الآيات / اسم القارئ
     xr = W - 290
-    ar_text(d, (xr, OY + 160), header_text, fit_ui(ui_path, header_text, 46, xr - 190), WHITE)
-    ar_text(d, (xr, OY + 250), reciter_name, fit_ui(ui_path, reciter_name, 62, xr - 190), WHITE)
+    ar_text(d, (xr, vy - 45), header_text, fit_ui(ui_path, header_text, 46, xr - 60), WHITE)
+    ar_text(d, (xr, vy + 45), reciter_name, fit_ui(ui_path, reciter_name, 62, xr - 60), WHITE)
 
-    # الشارتان (المصدر / النسخة)
-    chips = [("المصدر:", source_text), ("النسخة:", "نسخة أصلية")]
-    chip_size = 36
-    while chip_size > 24:
-        cf = load_font(ui_path, chip_size)
-        total = sum(ar_len(cf, a) + 10 + ar_len(cf, b) + 56 for a, b in chips) + 20 * (len(chips) - 1)
-        if total <= W - 60 - 190:
-            break
-        chip_size -= 2
-    cf = load_font(ui_path, chip_size)
-    right = W - 60
-    for a, b in chips:
-        right = draw_chip(d, right, OY + 385, a, b, cf) - 20
-
-    # زر العين
-    ex, ey = 110, OY + 385
-    circle_button(d, ex, ey, 50)
-    d.ellipse((ex - 28, ey - 16, ex + 28, ey + 16), outline=WHITE, width=4)
-    d.ellipse((ex - 8, ey - 8, ex + 8, ey + 8), outline=WHITE, width=4)
-
-    # كارت الآية
-    d.rounded_rectangle((50, card_top, W - 50, card_top + card_h), radius=70,
-                        fill=(0, 0, 0, 215), outline=(82, 82, 82, 255), width=3)
-
-    # شريط التقدم (المسار)
-    d.rounded_rectangle((BX0, bar_y - 8, BX1, bar_y + 8), radius=8, fill=BAR_TRACK)
-
-    # أزرار التحكم: تقديم | إيقاف | رجوع | تكرار
-    xs = [W // 2 - 300, W // 2 - 100, W // 2 + 100, W // 2 + 300]
-    circle_button(d, xs[0], ctrl_y)
-    for dx in (-14, 10):
-        x = xs[0] + dx
-        d.polygon([(x - 12, ctrl_y - 18), (x - 12, ctrl_y + 18), (x + 16, ctrl_y)], fill=WHITE)
-    d.rounded_rectangle((xs[1] - 38, ctrl_y - 62, xs[1] - 10, ctrl_y + 62), radius=8, fill=WHITE)
-    d.rounded_rectangle((xs[1] + 10, ctrl_y - 62, xs[1] + 38, ctrl_y + 62), radius=8, fill=WHITE)
-    circle_button(d, xs[2], ctrl_y)
-    for dx in (-10, 14):
-        x = xs[2] + dx
-        d.polygon([(x + 12, ctrl_y - 18), (x + 12, ctrl_y + 18), (x - 16, ctrl_y)], fill=WHITE)
-    circle_button(d, xs[3], ctrl_y)
-    x = xs[3]
-    d.line([(x - 28, ctrl_y - 16), (x + 18, ctrl_y - 16)], fill=WHITE, width=6)
-    d.polygon([(x + 16, ctrl_y - 30), (x + 16, ctrl_y - 2), (x + 36, ctrl_y - 16)], fill=WHITE)
-    d.line([(x + 28, ctrl_y + 16), (x - 18, ctrl_y + 16)], fill=WHITE, width=6)
-    d.polygon([(x - 16, ctrl_y + 2), (x - 16, ctrl_y + 30), (x - 36, ctrl_y + 16)], fill=WHITE)
+    # مسار شريط التقدم
+    d.rounded_rectangle((BX0, bar_y - 8, BX1, bar_y + 8), radius=8, fill=(255, 255, 255, 70))
 
     # تخطيط كلمات كل صفحة (يمين → يسار، كل كلمة بمكان ثابت)
     sp = max(qfont.getlength(" ", direction="rtl", language="ar"), size * 0.25)
@@ -701,28 +641,24 @@ def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, so
 
     def render(state, sec):
         img = base.copy()
-        dr = ImageDraw.Draw(img)
         pi, k, lvl = state
+        if k == 1 and pi > 0 and lvl < FADE_FRAMES:           # الصفحة القديمة بتختفي تدريجياً
+            a = 1 - lvl / FADE_FRAMES
+            for u, (x, y, w) in zip(flats[pi - 1], layouts[pi - 1]):
+                draw_word(img, u, x, y, w, qfont, size, WHITE, a)
         for i, (u, (x, y, w)) in enumerate(list(zip(flats[pi], layouts[pi]))[:k]):
             color = GOLD if (HIGHLIGHT and i == k - 1) else WHITE
-            if i == k - 1 and lvl < FADE_FRAMES:          # آخر كلمة: fade-in
-                x0, y0 = int(x - w - 30), int(y - size * 1.0)
-                x1, y1 = int(x + 30), int(y + size * 0.6)
-                layer = Image.new("RGBA", (x1 - x0, y1 - y0), color[:3] + (0,))
-                ImageDraw.Draw(layer).text((x - x0, y - y0), u, font=qfont,
-                                           fill=color[:3] + (int(255 * lvl / FADE_FRAMES),),
-                                           anchor="rs", direction="rtl", language="ar")
-                img.alpha_composite(layer, (x0, y0))
-                dr = ImageDraw.Draw(img)
-            else:
-                dr.text((x, y), u, font=qfont, fill=color, anchor="rs", direction="rtl", language="ar")
+            a = lvl / FADE_FRAMES if (i == k - 1 and lvl < FADE_FRAMES) else 1.0
+            draw_word(img, u, x, y, w, qfont, size, color, a)
+        dr = ImageDraw.Draw(img)
         frac = min(1.0, sec / total_s) if total_s > 0 else 0.0
         fw = int((BX1 - BX0) * frac)
         if fw > 0:
             dr.rounded_rectangle((BX0, bar_y - 8, BX0 + max(fw, 16), bar_y + 8), radius=8, fill=BAR_FILL)
-        dr.text((BX0, times_y), fmt_time(sec), font=f_time, fill=GREY, anchor="lm", direction="ltr")
-        dr.text((BX1, times_y), "-" + fmt_time(total_s - sec), font=f_time, fill=GREY,
-                anchor="rm", direction="ltr")
+        for xy, txt, anc in (((BX0, times_y), fmt_time(sec), "lm"),
+                             ((BX1, times_y), "-" + fmt_time(total_s - sec), "rm")):
+            dr.text(xy, txt, font=f_time, fill=(235, 235, 235, 255), anchor=anc, direction="ltr",
+                    stroke_width=2, stroke_fill=(0, 0, 0, 200))
         return img.tobytes()
 
     return render
@@ -840,9 +776,8 @@ def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, t
     a2 = str(end_ayah).translate(ARABIC_DIGITS)
     rng = a1 if start_ayah == end_ayah else f"{a1}-{a2}"
     header_text = f"{num_txt}-{surah_name} {rng}"
-    source_text = "المصحف المجوّد" if "mujawwad" in reciter_key else "المصحف المرتل"
 
-    render = make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, source_text,
+    render = make_renderer(font_path, ui_path, size, pages, header_text, reciter_name,
                            full_dur, t_start)
     segs = build_timeline(pages, duration, t_start)
 
@@ -857,7 +792,7 @@ def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, t
         bg_inputs = ["-stream_loop", "-1", "-i", bg_video]
         bg_filter = ("[0:v]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,"
                      f"fps={FPS},eq=saturation=1.25:contrast=1.1,unsharp=5:5:0.6:5:5:0.0,vignette=PI/5,"
-                     "drawbox=x=0:y=0:w=iw:h=ih:t=fill:c=black@0.40,format=yuv420p[bg];")
+                     "drawbox=x=0:y=0:w=iw:h=ih:t=fill:c=black@0.45,format=yuv420p[bg];")
     else:
         bg_inputs = ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={FPS}:d={duration + 1:.3f}"]
         bg_filter = "[0:v]format=yuv420p[bg];"
