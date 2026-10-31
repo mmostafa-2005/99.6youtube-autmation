@@ -18,7 +18,6 @@ Quran short-video generator (v2.2: ظهور كلمة بكلمة + شكل مشغ�
     LINES_PER_CARD  عدد الأسطر في الكارت: 1 أو 2 (الافتراضي 2) - كل سطر 4 كلمات بالكتير
     HIGHLIGHT       لو = 1: الكلمة اللي بتتقال دلوقتي تظهر بلون ذهبي (الافتراضي 0)
     FADE_FRAMES     مدة fade-in لكل كلمة بالفريمات (الافتراضي 6 ≈ 0.2 ثانية، 1 = من غير fade)
-    LOGO_PATH       مسار اللوجو (الافتراضي: logo.png / logo.jpg / logo.jpeg جنب السكريبت)
 """
 import glob
 import math
@@ -84,7 +83,6 @@ BG_MODE = os.environ.get("BG_MODE", "video").strip().lower()
 LINES_PER_CARD = min(2, max(1, int(os.environ.get("LINES_PER_CARD", "2") or 2)))
 HIGHLIGHT = os.environ.get("HIGHLIGHT", "0").strip() == "1"
 FADE_FRAMES = max(1, int(os.environ.get("FADE_FRAMES", "6") or 6))   # مدة الـ fade-in بالفريمات (6 ≈ 0.2 ث)
-LOGO_PATH = os.environ.get("LOGO_PATH", "").strip()
 
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 TELEGRAM_LIMIT_BYTES = 48 * 1024 * 1024
@@ -547,41 +545,17 @@ def ar_text(d, xy, text, font, fill, anchor="rm", stroke=3):
 
 
 def draw_word(img, u, x, y, w, font, size, color, alpha=1.0):
-    """يرسم كلمة بحدود سودا وشفافية alpha (للـ fade) على طبقة صغيرة."""
-    x0, y0 = max(0, int(x - w - 30)), int(y - size * 1.0)
-    x1, y1 = min(W, int(x + 30)), int(y + size * 0.6)
+    """يرسم كلمة بحد أسود خفيف وشفافية alpha (للـ fade). الطبقة بحجم الكلمة الفعلي عشان التشكيل ما يتقطعش."""
+    sw = 3
+    l, t, r, b = font.getbbox(u, anchor="rs", direction="rtl", language="ar", stroke_width=sw)
+    pad = 12
+    x0, y0 = max(0, int(x + l - pad)), max(0, int(y + t - pad))
+    x1, y1 = min(W, int(x + r + pad)), min(H, int(y + b + pad))
     layer = Image.new("RGBA", (x1 - x0, y1 - y0), color[:3] + (0,))
     ImageDraw.Draw(layer).text((x - x0, y - y0), u, font=font, fill=color[:3] + (int(255 * alpha),),
                                anchor="rs", direction="rtl", language="ar",
-                               stroke_width=6, stroke_fill=(0, 0, 0, int(235 * alpha)))
+                               stroke_width=sw, stroke_fill=(0, 0, 0, int(200 * alpha)))
     img.alpha_composite(layer, (x0, y0))
-
-
-def load_logo(diameter):
-    """يحمّل اللوجو، يقصّه حوالين المحتوى، ويرجّعه دايرة بقطر diameter (أو None لو مش موجود)."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    cands = [LOGO_PATH] if LOGO_PATH else []
-    for n in ("logo.png", "logo.jpg", "logo.jpeg"):
-        cands += [os.path.join(here, n), n]
-    cands += sorted(glob.glob(os.path.join(here, "logo.*")) + glob.glob("logo.*"))   # أي امتداد/كتابة تانية (مثلاً logo.jepg)
-    path = next((c for c in cands if c and os.path.exists(c)), None)
-    if not path:
-        print("[!] اللوجو مش موجود (logo.png)، هيتم استخدام الأسطوانة.")
-        return None
-    try:
-        im = Image.open(path).convert("RGB")
-        box = im.convert("L").point(lambda p: 255 if p > 60 else 0).getbbox() or (0, 0, im.width, im.height)
-        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-        side = max(box[2] - box[0], box[3] - box[1]) * 1.5
-        im = im.crop((int(cx - side / 2), int(cy - side / 2), int(cx + side / 2), int(cy + side / 2)))
-        im = im.resize((diameter, diameter), Image.LANCZOS).convert("RGBA")
-        mask = Image.new("L", (diameter * 4, diameter * 4), 0)
-        ImageDraw.Draw(mask).ellipse((0, 0, diameter * 4 - 1, diameter * 4 - 1), fill=255)
-        im.putalpha(mask.resize((diameter, diameter), Image.LANCZOS))
-        return im
-    except Exception as e:
-        print(f"[!] تعذر تحميل اللوجو: {e}")
-        return None
 
 
 def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, full_dur, t_start):
@@ -592,29 +566,12 @@ def make_renderer(font_path, ui_path, size, pages, header_text, reciter_name, fu
     cy = int(H * 0.54)                        # مركز الآيات (نص الشاشه أو أسفل شوية)
 
     base = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    # ظل ناعم خلف الآيات لرفع الوضوح من غير ما نغمّق الفيديو كله
-    scrim = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ImageDraw.Draw(scrim).rounded_rectangle((40, cy - line_h - 40, W - 40, cy + line_h + 40),
-                                            radius=90, fill=(0, 0, 0, 120))
-    base.alpha_composite(scrim.filter(ImageFilter.GaussianBlur(55)))
     d = ImageDraw.Draw(base)
 
-    # اللوجو داخل الدايرة (أو أسطوانة لو اللوجو مش موجود)
-    vx, vy = W - 150, 250
-    d.ellipse((vx - 95, vy - 95, vx + 95, vy + 95), fill=(10, 10, 10, 255), outline=(95, 95, 95, 255), width=6)
-    logo = load_logo(2 * 86)
-    if logo is not None:
-        base.alpha_composite(logo, (vx - 86, vy - 86))
-        d = ImageDraw.Draw(base)
-        d.ellipse((vx - 88, vy - 88, vx + 88, vy + 88), outline=(235, 235, 235, 255), width=3)
-    else:
-        d.ellipse((vx - 66, vy - 66, vx + 66, vy + 66), outline=WHITE, width=9)
-        d.ellipse((vx - 13, vy - 13, vx + 13, vy + 13), fill=(150, 150, 150, 255))
-
-    # السورة + نطاق الآيات / اسم القارئ
-    xr = W - 290
-    ar_text(d, (xr, vy - 45), header_text, fit_ui(ui_path, header_text, 46, xr - 60), WHITE)
-    ar_text(d, (xr, vy + 45), reciter_name, fit_ui(ui_path, reciter_name, 62, xr - 60), WHITE)
+    # السورة + نطاق الآيات / اسم القارئ (يمين فوق)
+    xr = W - 60
+    ar_text(d, (xr, 250), header_text, fit_ui(ui_path, header_text, 46, xr - 60), WHITE)
+    ar_text(d, (xr, 340), reciter_name, fit_ui(ui_path, reciter_name, 62, xr - 60), WHITE)
 
     # تخطيط كلمات كل صفحة (يمين → يسار، كل كلمة بمكان ثابت)
     sp = max(qfont.getlength(" ", direction="rtl", language="ar"), size * 0.25)
@@ -779,7 +736,7 @@ def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, t
         bg_inputs = ["-stream_loop", "-1", "-i", bg_video]
         bg_filter = ("[0:v]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,"
                      f"fps={FPS},eq=saturation=1.55:contrast=1.12:brightness=0.02,unsharp=5:5:0.8:5:5:0.0,"
-                     "drawbox=x=0:y=0:w=iw:h=ih:t=fill:c=black@0.15,format=yuv420p[bg];")
+                     "drawbox=x=0:y=0:w=iw:h=ih:t=fill:c=black@0.20,format=yuv420p[bg];")
     else:
         bg_inputs = ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={FPS}:d={duration + 1:.3f}"]
         bg_filter = "[0:v]format=yuv420p[bg];"
