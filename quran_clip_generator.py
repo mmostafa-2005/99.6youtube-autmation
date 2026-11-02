@@ -20,6 +20,8 @@ Quran short-video generator (v2.2: ظهور كلمة بكلمة + شكل مشغ�
     YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET / YOUTUBE_REFRESH_TOKEN   (Secrets) للنشر على يوتيوب
     YT_PRIVACY      public (الافتراضي) | unlisted | private
     TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID   (Secrets) لإرسال الفيديو على تليجرام
+    SYNC_LEAD_MS    الكلمة تبدأ تظهر قبل نطقها بكام ملي ثانية (الافتراضي 100). زوّدها لو النص متأخر، قلّلها لو متقدم
+    STRICT_SYNC     1 (الافتراضي) = لو توقيت الكلمات مش جاي من الـ API يوقف المقطع بدل ما ينشر مقطع غير مضبوط | 0 = يسمح بتوقيت تقديري
     FADE_FRAMES     مدة fade-in لكل كلمة بالفريمات (الافتراضي 6 ≈ 0.2 ثانية، 1 = من غير fade)
 """
 import glob
@@ -27,6 +29,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -87,6 +90,8 @@ PROGRESS_MODE = os.environ.get("PROGRESS_MODE", "shared").strip().lower()
 BG_MODE = os.environ.get("BG_MODE", "video").strip().lower()
 LINES_PER_CARD = min(2, max(1, int(os.environ.get("LINES_PER_CARD", "2") or 2)))
 HIGHLIGHT = os.environ.get("HIGHLIGHT", "0").strip() == "1"
+SYNC_LEAD = float(os.environ.get("SYNC_LEAD_MS", "100") or 0) / 1000.0   # الكلمة تبدأ تظهر قبل نطقها بالمدة دي
+STRICT_SYNC = os.environ.get("STRICT_SYNC", "1").strip() != "0"           # 1 = ارفض أي مقطع توقيت كلماته تقديري
 FADE_FRAMES = max(1, int(os.environ.get("FADE_FRAMES", "6") or 6))   # مدة الـ fade-in بالفريمات (6 ≈ 0.2 ث)
 
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
@@ -307,6 +312,9 @@ def fetch_surah_data(surah_num, reciter_key):
 
 def check_reciters():
     print("[*] فحص القراء المعرّفين (سورة 112 كعينة)...")
+    r = HTTP.get(f"{QCOM}/quran/verses/uthmani", params={"chapter_number": 112}, timeout=60)
+    r.raise_for_status()
+    vtext = {int(v["verse_key"].split(":")[1]): v["text_uthmani"] for v in r.json()["verses"]}
     for key, cfg in RECITERS.items():
         try:
             rid, data = resolve_chapter_audio(key, 112)
@@ -314,7 +322,9 @@ def check_reciters():
             validate_timestamps(ts)
             if len(ts) != 4:
                 raise RuntimeError(f"عدد التوقيتات {len(ts)} بدل 4")
-            print(f"[OK]   {key} ({cfg['name']}): id={rid} | {data['audio_url']}")
+            exact = sum(1 for a in ts if word_starts(ts[a], len(split_words(vtext[a]))))
+            tag = "توقيت الكلمات: حقيقي ✓" if exact == len(ts) else f"توقيت الكلمات: ناقص ✗ ({exact}/{len(ts)})"
+            print(f"[OK]   {key} ({cfg['name']}): id={rid} | {tag} | {data['audio_url']}")
         except Exception as e:
             print(f"[FAIL] {key} ({cfg['name']}): {e}")
     return 0
@@ -497,17 +507,17 @@ def word_starts(ayah_ts, n_words):
 
 
 def word_start_times(ayah_ts, words):
-    """وقت بداية كل كلمة (مطلق داخل ملف السورة). بديل: توزيع حسب عدد الحروف."""
+    """يرجّع (توقيت بداية كل كلمة، هل التوقيت حقيقي من الـ API؟). البديل التقديري: توزيع حسب الحروف."""
     starts = word_starts(ayah_ts, len(words))
     if starts:
-        return starts
+        return starts, True
     a_from, a_to = ayah_ts["from"], ayah_ts["to"]
     weights = [max(1, len(w)) for w in words]
     total, acc, out = sum(weights), 0, []
     for wt in weights:
         out.append(a_from + (a_to - a_from) * acc / total)
         acc += wt
-    return out
+    return out, False
 
 
 # ----------------------------------------------------------------------------
@@ -668,6 +678,23 @@ def encode(cmd_builder, frames_factory, out_file):
     return os.path.getsize(out_file)
 
 
+def measure_gain(path, target_lufs=-16.0, peak_db=-1.5):
+    """قياس مرة واحدة ثم gain ثابت (بديل loudnorm اللي ممكن يأخر الصوت)."""
+    try:
+        p = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", path, "-af",
+                            "ebur128=framelog=quiet,volumedetect", "-f", "null", "-"],
+                           capture_output=True, text=True)
+        loud = re.findall(r"I:\s+(-?\d+(?:\.\d+)?)\s+LUFS", p.stderr)
+        peak = re.findall(r"max_volume:\s+(-?\d+(?:\.\d+)?)\s+dB", p.stderr)
+        gain = target_lufs - float(loud[-1])
+        if peak:
+            gain = min(gain, peak_db - float(peak[-1]))
+        return max(-12.0, min(20.0, gain))
+    except Exception as e:
+        print(f"[!] تعذر قياس مستوى الصوت ({e})، هيتم تركه كما هو.")
+        return 0.0
+
+
 def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, timestamps,
                 audio_url, start_ayah, end_ayah, bg_video):
     font_path = find_font()
@@ -692,23 +719,33 @@ def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, t
         raise RuntimeError(f"التوقيت ({t_end:.1f}ث) أطول من ملف الصوت ({full_dur:.1f}ث): "
                            f"الملف مش مطابق لبيانات التوقيت، تم الإيقاف.")
 
-    cut_audio = os.path.join(TEMP_DIR, "cut.mp3")
+    # قص بدقة إلى WAV (من غير ترميز MP3 اللي بيضيف تأخير)، وبعدين ضبط الصوت بـ volume ثابت من غير أي latency
+    raw_audio = os.path.join(TEMP_DIR, "cut_raw.wav")
     run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", full_audio,
-         "-ss", f"{t_start:.3f}", "-to", f"{t_end:.3f}", "-c:a", "libmp3lame", "-q:a", "2", cut_audio],
-        "قص الصوت")
-    duration = probe_duration(cut_audio)
+         "-ss", f"{t_start:.3f}", "-to", f"{t_end:.3f}", "-ac", "2", "-ar", "44100",
+         "-c:a", "pcm_s16le", raw_audio], "قص الصوت")
+    duration = probe_duration(raw_audio)
+    gain = measure_gain(raw_audio)
+    cut_audio = os.path.join(TEMP_DIR, "cut.wav")
+    run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", raw_audio,
+         "-af", f"volume={gain:.2f}dB,afade=t=in:st=0:d=0.15,"
+                f"afade=t=out:st={max(0.0, duration - 0.5):.3f}:d=0.5",
+         "-c:a", "pcm_s16le", cut_audio], "معالجة الصوت")
 
     # --- الصفحات: كل صفحة = سطر أو سطرين (≤4 كلمات للسطر) من نفس الآية ---
     pages = []
+    estimated = []
     for ayah in range(start_ayah, end_ayah + 1):
         words = split_words(verses_text[ayah])
         if not words:
             continue
         plan = plan_chunks(words)
-        starts = word_start_times(timestamps[ayah], words)
+        starts, exact = word_start_times(timestamps[ayah], words)
+        if not exact:
+            estimated.append(ayah)
         num_ar = str(ayah).translate(ARABIC_DIGITS)
         units = words[:-1] + [f"{words[-1]} \u06dd{num_ar}"]      # رقم الآية يظهر مع آخر كلمة
-        lines = [(units[a:b], [max(0.0, min(duration, s - t_start)) for s in starts[a:b]])
+        lines = [(units[a:b], [max(0.0, min(duration, s - t_start - SYNC_LEAD)) for s in starts[a:b]])
                  for a, b in plan]
         for i in range(0, len(lines), LINES_PER_CARD):
             grp = lines[i:i + LINES_PER_CARD]
@@ -716,6 +753,14 @@ def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, t
 
     if not pages:
         raise RuntimeError("لا توجد صفحات لتصديرها")
+    if estimated:
+        msg = (f"توقيت الكلمات للآيات {estimated} مش جاي من الـ API (تقديري). "
+               "القارئ ده غالباً مفيش له توقيت كلمات؛ شغّل CHECK_RECITERS=1 وجرّب قارئ تاني.")
+        if STRICT_SYNC:
+            raise RuntimeError(msg + " (STRICT_SYNC=1: تم إيقاف المقطع بدل نشره غير مضبوط)")
+        print(f"[!] تحذير: {msg}")
+    else:
+        print(f"[✓] توقيت كل الكلمات حقيقي من الـ API | تقديم العرض بـ {SYNC_LEAD * 1000:.0f} ms")
 
     size = fit_font_size(font_path, [" ".join(l) for p in pages for l in p["lines"]])
     n_words = sum(len(l) for p in pages for l in p["lines"])
@@ -749,9 +794,6 @@ def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, t
         bg_filter = "[0:v]format=yuv420p[bg];"
 
     filters = bg_filter + "[bg][1:v]overlay=0:0:eof_action=repeat:format=auto,format=yuv420p[v]"
-    afilter = (f"loudnorm=I=-16:TP=-1.5:LRA=11,"
-               f"afade=t=in:st=0:d=0.15,afade=t=out:st={max(0.0, duration - 0.5):.3f}:d=0.5")
-
     out_file = os.path.join(OUT_DIR, f"Surah_{surah_num}_{start_ayah}-{end_ayah}_{reciter_key}.mp4")
 
     def cmd_builder(crf):
@@ -761,7 +803,6 @@ def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, t
                 "-i", cut_audio,
                 "-filter_complex", filters,
                 "-map", "[v]", "-map", "2:a",
-                "-af", afilter,
                 "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
                 "-maxrate", "9M", "-bufsize", "18M",
                 "-profile:v", "high", "-pix_fmt", "yuv420p", "-r", str(FPS),
@@ -846,12 +887,32 @@ def send_to_telegram(clip, extra=""):
     return False
 
 
+YT_HINTS = {
+    "invalid_grant": "الـ REFRESH_TOKEN منتهي أو غلط. لو الـ OAuth consent screen على Testing الـ token بيموت بعد 7 أيام: خليه In production وهات token جديد.",
+    "invalid_client": "YOUTUBE_CLIENT_ID أو YOUTUBE_CLIENT_SECRET غلط (أو مش من نفس المشروع اللي طلع منه الـ token).",
+    "accessNotConfigured": "YouTube Data API v3 مش مفعّل في مشروع Google Cloud.",
+    "quotaExceeded": "خلصت حصة اليوم (10,000 وحدة، والرفع = 1600). استنى لبكرة (منتصف الليل بتوقيت المحيط الهادي).",
+    "uploadLimitExceeded": "القناة وصلت حد الرفع اليومي بتاع يوتيوب.",
+    "insufficientPermissions": "الـ token اتاخد من غير scope الرفع. اطلب scope: https://www.googleapis.com/auth/youtube.upload",
+    "forbidden": "الحساب/القناة مش مسموح له بالرفع بالـ token ده. اتأكد إنك اخترت القناة الصح وقت تسجيل الدخول.",
+    "youtubeSignupRequired": "الحساب ملوش قناة يوتيوب. اعمل قناة الأول.",
+    "unauthorized_client": "الـ client ده مش مسموح له بالـ scope أو نوعه غلط (استخدم Desktop app).",
+}
+
+
+def yt_hint(text):
+    for k, v in YT_HINTS.items():
+        if k in text:
+            return f" ← {v}"
+    return ""
+
+
 def youtube_access_token():
     r = requests.post("https://oauth2.googleapis.com/token", timeout=60, data={
         "client_id": YT_CLIENT_ID, "client_secret": YT_CLIENT_SECRET,
         "refresh_token": YT_REFRESH_TOKEN, "grant_type": "refresh_token"})
     if r.status_code != 200:
-        raise RuntimeError(f"فشل تسجيل الدخول ليوتيوب ({r.status_code}): {r.text[:400]}")
+        raise RuntimeError(f"فشل تسجيل الدخول ليوتيوب ({r.status_code}): {r.text[:400]}{yt_hint(r.text)}")
     return r.json()["access_token"]
 
 
@@ -882,12 +943,12 @@ def upload_to_youtube(clip, attempts=3):
                          "X-Upload-Content-Type": "video/mp4"},
                 data=json.dumps(meta, ensure_ascii=False).encode("utf-8"), timeout=60)
             if init.status_code != 200:
-                raise RuntimeError(f"بدء الرفع فشل ({init.status_code}): {init.text[:400]}")
+                raise RuntimeError(f"بدء الرفع فشل ({init.status_code}): {init.text[:400]}{yt_hint(init.text)}")
             with open(path, "rb") as f:
                 up = requests.put(init.headers["Location"], data=f, timeout=1800,
                                   headers={"Content-Type": "video/mp4", "Content-Length": str(size)})
             if up.status_code not in (200, 201):
-                raise RuntimeError(f"الرفع فشل ({up.status_code}): {up.text[:400]}")
+                raise RuntimeError(f"الرفع فشل ({up.status_code}): {up.text[:400]}{yt_hint(up.text)}")
             res = up.json()
             vid = res["id"]
             url = f"https://youtube.com/shorts/{vid}"
@@ -900,6 +961,10 @@ def upload_to_youtube(clip, attempts=3):
         except Exception as e:
             last_err = e
             print(f"[!] محاولة {attempt}/{attempts} فشلت: {e}")
+            if any(k in str(e) for k in ("invalid_grant", "invalid_client", "accessNotConfigured",
+                                         "quotaExceeded", "uploadLimitExceeded", "insufficientPermissions",
+                                         "youtubeSignupRequired", "unauthorized_client")):
+                break
             time.sleep(10 * attempt)
     raise RuntimeError(f"فشل النشر على يوتيوب: {last_err}")
 
@@ -949,7 +1014,9 @@ def main():
             print("[!] النشر على يوتيوب فشل، لن يتم الإرسال أو تسجيل المقطع (سيُعاد المحاولة في التشغيل القادم).")
             return 1
     else:
-        print("[!] بيانات يوتيوب غير مكتملة (YOUTUBE_CLIENT_ID / SECRET / REFRESH_TOKEN)، تم تخطي النشر.")
+        missing = [n for n, v in (("YOUTUBE_CLIENT_ID", YT_CLIENT_ID), ("YOUTUBE_CLIENT_SECRET", YT_CLIENT_SECRET),
+                                  ("YOUTUBE_REFRESH_TOKEN", YT_REFRESH_TOKEN)) if not v]
+        print(f"[!] النشر على يوتيوب متخطّى لأن الـ Secrets دي فاضية أو مش متسمّية صح: {', '.join(missing)}")
 
     tg_ok = send_to_telegram(clip, extra=yt_url or "")
 
