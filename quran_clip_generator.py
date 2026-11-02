@@ -17,9 +17,13 @@ Quran short-video generator (v2.2: ظهور كلمة بكلمة + شكل مشغ�
     BG_MODE         video (الافتراضي: فيديو طبيعة من Pixabay) | black (خلفية سوداء)
     LINES_PER_CARD  عدد الأسطر في الكارت: 1 أو 2 (الافتراضي 2) - كل سطر 4 كلمات بالكتير
     HIGHLIGHT       لو = 1: الكلمة اللي بتتقال دلوقتي تظهر بلون ذهبي (الافتراضي 0)
+    YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET / YOUTUBE_REFRESH_TOKEN   (Secrets) للنشر على يوتيوب
+    YT_PRIVACY      public (الافتراضي) | unlisted | private
+    TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID   (Secrets) لإرسال الفيديو على تليجرام
     FADE_FRAMES     مدة fade-in لكل كلمة بالفريمات (الافتراضي 6 ≈ 0.2 ثانية، 1 = من غير fade)
 """
 import glob
+import json
 import math
 import os
 import random
@@ -27,6 +31,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import traceback
 
 import requests
@@ -87,9 +92,11 @@ FADE_FRAMES = max(1, int(os.environ.get("FADE_FRAMES", "6") or 6))   # مدة ا
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 TELEGRAM_LIMIT_BYTES = 48 * 1024 * 1024
 
-MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY")
+YT_CLIENT_ID = os.environ.get("YOUTUBE_CLIENT_ID", "").strip()
+YT_CLIENT_SECRET = os.environ.get("YOUTUBE_CLIENT_SECRET", "").strip()
+YT_REFRESH_TOKEN = os.environ.get("YOUTUBE_REFRESH_TOKEN", "").strip()
+YT_PRIVACY = os.environ.get("YT_PRIVACY", "public").strip().lower()      # public | unlisted | private
+YT_ENABLED = bool(YT_CLIENT_ID and YT_CLIENT_SECRET and YT_REFRESH_TOKEN)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -792,25 +799,41 @@ def generate_video(conn, surah_num, reciter_key, bg_video=None):
     title = (f"سورة {surah_name} (الآيات {start_ayah}-{end_ayah}) | "
              f"القارئ {reciter['name']} #قرآن #shorts")
     return {"path": out_file, "title": title, "surah": surah_num, "start": start_ayah,
-            "end": end_ayah, "duration": duration}
+            "end": end_ayah, "duration": duration, "reciter": reciter["name"]}
 
 
 # ----------------------------------------------------------------------------
 # 8. التسليم: Telegram / GitHub / Make (بدون تغيير)
 # ----------------------------------------------------------------------------
-def send_to_telegram(clip):
+def telegram_copy(clip):
+    """لو الفيديو أكبر من حد تليجرام بنعمل نسخة مضغوطة له (يوتيوب بياخد النسخة الأصلية)."""
+    path = clip["path"]
+    if os.path.getsize(path) <= TELEGRAM_LIMIT_BYTES:
+        return path
+    kbps = int(TELEGRAM_LIMIT_BYTES * 8 * 0.92 / max(1.0, clip["duration"]) / 1000) - 160
+    out = path.replace(".mp4", "_tg.mp4")
+    run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+         "-c:v", "libx264", "-preset", "veryfast", "-b:v", f"{kbps}k", "-maxrate", f"{kbps}k",
+         "-bufsize", f"{2 * kbps}k", "-pix_fmt", "yuv420p", "-c:a", "copy",
+         "-movflags", "+faststart", out], "ضغط نسخة تليجرام")
+    print(f"[*] نسخة تليجرام: {os.path.getsize(out) / 1024 / 1024:.1f} MB")
+    return out
+
+
+def send_to_telegram(clip, extra=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("[!] بيانات Telegram غير مكتملة، تم التخطي.")
         return False
-    size = os.path.getsize(clip["path"])
-    if size > 50 * 1024 * 1024:
-        print("[!] الفيديو أكبر من 50MB (حد تليجرام للبوتات)، تم التخطي.")
-        return False
     try:
-        with open(clip["path"], "rb") as f:
+        path = telegram_copy(clip)
+        if os.path.getsize(path) > 50 * 1024 * 1024:
+            print("[!] الفيديو أكبر من 50MB (حد تليجرام للبوتات)، تم التخطي.")
+            return False
+        caption = (clip["title"] + (f"\n{extra}" if extra else ""))[:1024]
+        with open(path, "rb") as f:
             res = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo",
-                data={"chat_id": TELEGRAM_CHAT_ID, "caption": clip["title"][:1024],
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption,
                       "supports_streaming": "true", "width": W, "height": H,
                       "duration": int(clip["duration"])},
                 files={"video": f}, timeout=600)
@@ -823,57 +846,62 @@ def send_to_telegram(clip):
     return False
 
 
-def upload_to_github_release(video_path, tag_name="latest", keep_assets=15):
-    if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
-        print("[!] بيانات GitHub غير متوفرة.")
-        return None
-
-    file_name = os.path.basename(video_path)
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
-    api = f"https://api.github.com/repos/{GITHUB_REPOSITORY}"
-
-    res = requests.get(f"{api}/releases/tags/{tag_name}", headers=headers, timeout=60)
-    if res.status_code == 200:
-        release = res.json()
-    else:
-        res = requests.post(f"{api}/releases", headers=headers, timeout=60,
-                            json={"tag_name": tag_name, "name": "Latest Quran Clip",
-                                  "draft": False, "prerelease": False})
-        res.raise_for_status()
-        release = res.json()
-    release_id = release["id"]
-
-    assets = release.get("assets", [])
-    for a in assets:
-        if a["name"] == file_name:
-            requests.delete(a["url"], headers=headers, timeout=60)
-    old = sorted([a for a in assets if a["name"] != file_name], key=lambda a: a["created_at"])
-    for a in old[:-keep_assets] if keep_assets and len(old) > keep_assets else []:
-        requests.delete(a["url"], headers=headers, timeout=60)
-
-    upload_url = f"https://uploads.github.com/repos/{GITHUB_REPOSITORY}/releases/{release_id}/assets"
-    with open(video_path, "rb") as f:
-        up = requests.post(upload_url, params={"name": file_name},
-                           headers={**headers, "Content-Type": "video/mp4"}, data=f, timeout=900)
-    up.raise_for_status()
-    url = up.json()["browser_download_url"]
-    print(f"[✓] تم الرفع إلى GitHub: {url}")
-    return url
+def youtube_access_token():
+    r = requests.post("https://oauth2.googleapis.com/token", timeout=60, data={
+        "client_id": YT_CLIENT_ID, "client_secret": YT_CLIENT_SECRET,
+        "refresh_token": YT_REFRESH_TOKEN, "grant_type": "refresh_token"})
+    if r.status_code != 200:
+        raise RuntimeError(f"فشل تسجيل الدخول ليوتيوب ({r.status_code}): {r.text[:400]}")
+    return r.json()["access_token"]
 
 
-def notify_make(video_url, video_title):
-    if not MAKE_WEBHOOK_URL:
-        print("[!] MAKE_WEBHOOK_URL غير موجود.")
-        return False
-    try:
-        res = requests.post(MAKE_WEBHOOK_URL, json={"video_url": video_url, "title": video_title}, timeout=60)
-        if res.status_code in (200, 204):
-            print("[✓] استلم Make.com الطلب")
-            return True
-        print(f"[!] خطأ Make: {res.status_code} - {res.text[:300]}")
-    except Exception as e:
-        print(f"[!] خطأ Make: {e}")
-    return False
+def upload_to_youtube(clip, attempts=3):
+    """ينشر الفيديو على يوتيوب (Shorts) ويرجّع الرابط."""
+    path = clip["path"]
+    size = os.path.getsize(path)
+    meta = {
+        "snippet": {
+            "title": clip["title"][:100],
+            "description": (clip["title"] + "\n\n#قرآن #القرآن_الكريم #shorts")[:4900],
+            "tags": ["قرآن", "القرآن الكريم", "تلاوة", "shorts", clip.get("reciter", "")],
+            "categoryId": "22",
+            "defaultLanguage": "ar",
+        },
+        "status": {"privacyStatus": YT_PRIVACY, "selfDeclaredMadeForKids": False},
+    }
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            token = youtube_access_token()
+            init = requests.post(
+                "https://www.googleapis.com/upload/youtube/v3/videos",
+                params={"uploadType": "resumable", "part": "snippet,status"},
+                headers={"Authorization": f"Bearer {token}",
+                         "Content-Type": "application/json; charset=UTF-8",
+                         "X-Upload-Content-Length": str(size),
+                         "X-Upload-Content-Type": "video/mp4"},
+                data=json.dumps(meta, ensure_ascii=False).encode("utf-8"), timeout=60)
+            if init.status_code != 200:
+                raise RuntimeError(f"بدء الرفع فشل ({init.status_code}): {init.text[:400]}")
+            with open(path, "rb") as f:
+                up = requests.put(init.headers["Location"], data=f, timeout=1800,
+                                  headers={"Content-Type": "video/mp4", "Content-Length": str(size)})
+            if up.status_code not in (200, 201):
+                raise RuntimeError(f"الرفع فشل ({up.status_code}): {up.text[:400]}")
+            res = up.json()
+            vid = res["id"]
+            url = f"https://youtube.com/shorts/{vid}"
+            actual = (res.get("status") or {}).get("privacyStatus", YT_PRIVACY)
+            print(f"[✓] تم رفع الفيديو على يوتيوب (الخصوصية الفعلية: {actual}): {url}")
+            if actual != YT_PRIVACY:
+                print(f"[!] تنبيه: طلبنا {YT_PRIVACY} بس يوتيوب خلّاه {actual}. ده بيحصل لمشاريع Google "
+                      "اللي لسه ما عدّتش مراجعة YouTube API Audit، وبيتحل بالمراجعة مش بالكود.")
+            return url
+        except Exception as e:
+            last_err = e
+            print(f"[!] محاولة {attempt}/{attempts} فشلت: {e}")
+            time.sleep(10 * attempt)
+    raise RuntimeError(f"فشل النشر على يوتيوب: {last_err}")
 
 
 # ----------------------------------------------------------------------------
@@ -912,15 +940,20 @@ def main():
         print("[!] لا توجد مقاطع جديدة.")
         return 0
 
-    tg_ok = send_to_telegram(clip)
-    gh_url = None
-    try:
-        gh_url = upload_to_github_release(clip["path"])
-    except Exception as e:
-        print(f"[!] فشل رفع GitHub: {e}")
-    make_ok = notify_make(gh_url, clip["title"]) if gh_url else False
+    yt_url = None
+    if YT_ENABLED:
+        try:
+            yt_url = upload_to_youtube(clip)
+        except Exception as e:
+            print(f"[!] {e}")
+            print("[!] النشر على يوتيوب فشل، لن يتم الإرسال أو تسجيل المقطع (سيُعاد المحاولة في التشغيل القادم).")
+            return 1
+    else:
+        print("[!] بيانات يوتيوب غير مكتملة (YOUTUBE_CLIENT_ID / SECRET / REFRESH_TOKEN)، تم تخطي النشر.")
 
-    delivered = make_ok if MAKE_WEBHOOK_URL else (tg_ok or bool(gh_url))
+    tg_ok = send_to_telegram(clip, extra=yt_url or "")
+
+    delivered = bool(yt_url) if YT_ENABLED else tg_ok
     if delivered:
         mark_clip_done(conn, clip["surah"], clip["start"], clip["end"], reciter_key, clip["duration"])
         print("[✓] تم تسجيل المقطع كمنتهٍ.")
