@@ -322,7 +322,7 @@ def check_reciters():
             validate_timestamps(ts)
             if len(ts) != 4:
                 raise RuntimeError(f"عدد التوقيتات {len(ts)} بدل 4")
-            exact = sum(1 for a in ts if word_starts(ts[a], len(split_words(vtext[a]))))
+            exact = sum(1 for a in ts if word_start_times(ts[a], split_words(vtext[a]))[1])
             tag = "توقيت الكلمات: حقيقي ✓" if exact == len(ts) else f"توقيت الكلمات: ناقص ✗ ({exact}/{len(ts)})"
             print(f"[OK]   {key} ({cfg['name']}): id={rid} | {tag} | {data['audio_url']}")
         except Exception as e:
@@ -479,45 +479,100 @@ def plan_chunks(words, max_w=MAX_WORDS_PER_LINE):
     return out
 
 
-def word_starts(ayah_ts, n_words):
-    """يستخرج توقيت بداية كل كلمة من segments؛ يرجع None لو البيانات غير موثوقة."""
+def _segment_starts(ayah_ts, n):
+    """يرجّع ({موضع الكلمة: وقت بدايتها}, "") أو (None, سبب الرفض). مفيش تخمين هنا."""
     raw = ayah_ts.get("segments")
     if not raw:
-        return None
+        return None, "الـ API ما رجّعش segments للآية دي"
     a_from, a_to = ayah_ts["from"], ayah_ts["to"]
-    starts = {}
+    pos_start = {}
     try:
-        for s in raw:
-            if len(s) >= 4:
-                pos, f = int(s[1]), float(s[2])
-            elif len(s) == 3:
-                pos, f = int(s[0]), float(s[1])
+        for sg in raw:
+            if len(sg) >= 4:
+                pos, f = int(sg[1]), float(sg[2])
+            elif len(sg) == 3:
+                pos, f = int(sg[0]), float(sg[1])
             else:
                 continue
-            starts.setdefault(pos, f / 1000.0)
-        arr = [starts[i] for i in range(1, n_words + 1)]
-    except (KeyError, ValueError, TypeError):
-        return None
-
-    if arr[0] < a_from - 1.0 and arr[-1] <= (a_to - a_from) + 1.0:
-        arr = [x + a_from for x in arr]
-    in_range = all(a_from - 0.6 <= x <= a_to + 0.6 for x in arr)
-    increasing = all(arr[i] <= arr[i + 1] for i in range(len(arr) - 1))
-    return arr if (in_range and increasing) else None
+            pos_start.setdefault(pos, f / 1000.0)
+    except (ValueError, TypeError):
+        return None, "شكل segments غير متوقع"
+    if not pos_start:
+        return None, "segments فاضية"
+    max_pos = max(pos_start)
+    if max_pos not in (n, n + 1):                      # n+1 = علامة نهاية الآية
+        return None, f"عدد الكلمات مختلف: النص={n} والـ API={max_pos}"
+    vals = {k: v for k, v in pos_start.items() if 1 <= k <= n}
+    if len(vals) < max(1, int(0.7 * n + 0.5)):
+        return None, f"مواضع ناقصة: {len(vals)} من {n}"
+    ks = sorted(vals)
+    if vals[ks[0]] < a_from - 1.0 and vals[ks[-1]] <= (a_to - a_from) + 1.0:   # توقيتات نسبية لبداية الآية
+        vals = {k: v + a_from for k, v in vals.items()}
+    if any(not (a_from - 0.6 <= v <= a_to + 0.6) for v in vals.values()):
+        return None, "توقيتات الكلمات خارج مدى الآية"
+    prev = -1.0
+    for k in ks:
+        if vals[k] < prev - 0.3:
+            return None, "ترتيب توقيتات الكلمات غير منطقي"
+        prev = max(prev, vals[k])
+    return vals, ""
 
 
 def word_start_times(ayah_ts, words):
-    """يرجّع (توقيت بداية كل كلمة، هل التوقيت حقيقي من الـ API؟). البديل التقديري: توزيع حسب الحروف."""
-    starts = word_starts(ayah_ts, len(words))
-    if starts:
-        return starts, True
+    """يرجّع (توقيت بداية كل كلمة، هل مبني على توقيت حقيقي من الـ API؟، ملاحظة).
+    كلمة ناقص لها segment بتتحسب بالتناسب بين أقرب كلمتين مؤكدتين (لا بتخمين على الآية كلها)."""
+    n = len(words)
     a_from, a_to = ayah_ts["from"], ayah_ts["to"]
+    vals, reason = _segment_starts(ayah_ts, n)
+    if vals is not None:
+        starts = [None] * n
+        for k, v in vals.items():
+            starts[k - 1] = v
+        run_max = a_from
+        for i in range(n):                            # لا رجوع للخلف
+            if starts[i] is not None:
+                starts[i] = run_max = max(run_max, starts[i])
+        missing = [i + 1 for i in range(n) if starts[i] is None]
+        i = 0
+        while i < n:
+            if starts[i] is None:
+                j = i
+                while j < n and starts[j] is None:
+                    j += 1
+                first = i - 1 if i > 0 else 0              # الكلمة اللي بدايتها t0
+                t0 = starts[i - 1] if i > 0 else a_from
+                t1 = starts[j] if j < n else a_to
+                w = [max(1, len(words[x])) for x in range(first, j)]
+                tot = float(sum(w))
+                for x in range(i, j):
+                    starts[x] = t0 + (t1 - t0) * sum(w[:x - first]) / tot
+                i = j
+            else:
+                i += 1
+        note = f"{len(missing)} كلمة بالتناسب بين كلمات مؤكدة: {missing}" if missing else ""
+        return starts, True, note
     weights = [max(1, len(w)) for w in words]
     total, acc, out = sum(weights), 0, []
     for wt in weights:
         out.append(a_from + (a_to - a_from) * acc / total)
         acc += wt
-    return out, False
+    return out, False, reason
+
+
+def fetch_api_words(surah, ayah):
+    """كلمات الآية بنفس ترقيم Quran.com (نفس ترقيم segments) كبديل لو عدد الكلمات اتلخبط."""
+    try:
+        r = HTTP.get(f"{QCOM}/verses/by_key/{surah}:{ayah}", timeout=60,
+                     params={"words": "true", "word_fields": "text_uthmani"})
+        r.raise_for_status()
+        ws = [w for w in r.json()["verse"]["words"] if w.get("char_type_name", "word") == "word"]
+        ws.sort(key=lambda w: w["position"])
+        if [w["position"] for w in ws] != list(range(1, len(ws) + 1)):
+            return None
+        return [w["text_uthmani"] for w in ws]
+    except Exception as e:
+        print(f"[!] تعذر جلب كلمات الـ API للآية {surah}:{ayah}: {e}")
+        return None
 
 
 # ----------------------------------------------------------------------------
@@ -739,10 +794,23 @@ def build_video(surah_num, reciter_key, reciter_name, surah_name, verses_text, t
         words = split_words(verses_text[ayah])
         if not words:
             continue
-        plan = plan_chunks(words)
-        starts, exact = word_start_times(timestamps[ayah], words)
+        starts, exact, note = word_start_times(timestamps[ayah], words)
         if not exact:
+            print(f"[SYNC] آية {ayah}: {note} → جرّب ترقيم كلمات الـ API")
+            alt = fetch_api_words(surah_num, ayah)
+            if alt and len(alt) != len(words):
+                starts2, exact2, note2 = word_start_times(timestamps[ayah], alt)
+                if exact2:
+                    words, starts, exact, note = alt, starts2, True, note2
+                else:
+                    note = note2
+        if note and exact:
+            print(f"[SYNC] آية {ayah}: {note}")
+        if not exact:
+            print(f"[SYNC] آية {ayah}: فشل ({note}). كلمات النص={len(words)} | "
+                  f"segments={str(timestamps[ayah].get('segments'))[:300]}")
             estimated.append(ayah)
+        plan = plan_chunks(words)
         num_ar = str(ayah).translate(ARABIC_DIGITS)
         units = words[:-1] + [f"{words[-1]} \u06dd{num_ar}"]      # رقم الآية يظهر مع آخر كلمة
         lines = [(units[a:b], [max(0.0, min(duration, s - t_start - SYNC_LEAD)) for s in starts[a:b]])
